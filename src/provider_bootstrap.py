@@ -3,11 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
-from numbers import Real
-from urllib.parse import quote
-
-import requests
 
 from .config import (
     AKSHARE_PROXY_AUTH_IP,
@@ -19,7 +14,6 @@ from .config import (
 
 logger = logging.getLogger(__name__)
 _installed = False
-_BALANCE_TIMEOUT_SECONDS = 5
 
 
 def install_data_provider_patch() -> bool:
@@ -33,10 +27,6 @@ def install_data_provider_patch() -> bool:
         )
     if AKSHARE_PROXY_RETRY < 1:
         raise RuntimeError("AKShare proxy retry must be at least 1")
-    if not _has_positive_balance():
-        logger.warning("[AKSHARE] proxy patch not enabled: balance unavailable or non-positive")
-        return False
-
     try:
         import akshare_proxy_patch
     except ImportError as exc:
@@ -61,23 +51,3 @@ def install_data_provider_patch() -> bool:
         AKSHARE_PROXY_RETRY,
     )
     return True
-
-
-def _has_positive_balance() -> bool:
-    """Fail closed without logging the reusable token."""
-    try:
-        response = requests.get(
-            f"http://{AKSHARE_PROXY_AUTH_IP}:47001/api/token/"
-            f"{quote(AKSHARE_PROXY_AUTH_TOKEN, safe='')}",
-            timeout=_BALANCE_TIMEOUT_SECONDS,
-        )
-        payload = response.json() if 200 <= response.status_code < 300 else None
-        balance = payload.get("balance") if isinstance(payload, dict) else None
-        return (
-            isinstance(balance, Real)
-            and not isinstance(balance, bool)
-            and math.isfinite(float(balance))
-            and balance > 0
-        )
-    except (requests.RequestException, ValueError, TypeError, OverflowError):
-        return False

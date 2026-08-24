@@ -2,11 +2,11 @@
 
 from datetime import datetime, timedelta
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-import pytz
 
-from src.data_fetcher import get_prices_for_rsi, _adjust_spot_price
+from src.data_fetcher import _adjust_spot_price, get_prices_for_rsi
 
 
 class TestAdjustSpotPrice:
@@ -76,7 +76,7 @@ class TestGetPricesForRsi:
 
     def test_appends_today_price(self):
         """历史数据最后日期早于今天时，应追加今日价格。"""
-        tz = pytz.timezone('Asia/Shanghai')
+        tz = ZoneInfo('Asia/Shanghai')
         yesterday = (datetime.now(tz) - timedelta(days=1)).strftime('%Y-%m-%d')
         df = self._make_hist_df(
             [yesterday],
@@ -90,7 +90,7 @@ class TestGetPricesForRsi:
 
     def test_replaces_today_price(self):
         """历史数据包含今日时，应替换最后一个值。"""
-        tz = pytz.timezone('Asia/Shanghai')
+        tz = ZoneInfo('Asia/Shanghai')
         today = datetime.now(tz).strftime('%Y-%m-%d')
         df = self._make_hist_df(
             [today],
@@ -104,7 +104,7 @@ class TestGetPricesForRsi:
 
     def test_preserves_history(self):
         """历史数据不应被修改。"""
-        tz = pytz.timezone('Asia/Shanghai')
+        tz = ZoneInfo('Asia/Shanghai')
         yesterday = (datetime.now(tz) - timedelta(days=2)).strftime('%Y-%m-%d')
         day_before = (datetime.now(tz) - timedelta(days=3)).strftime('%Y-%m-%d')
         df = self._make_hist_df(

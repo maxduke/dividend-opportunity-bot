@@ -19,7 +19,7 @@ src/
 ├── metrics.py         # Opportunity 指标与评分纯函数
 ├── scoring_config.py  # 集中的评分阈值
 ├── opportunity.py     # Opportunity 评估、门控、消息格式与告警判断
-├── market.py          # 交易日判断、交易时间检查、东方财富封禁检测（asyncio.Lock）
+├── market.py          # XSHG 交易日历与超出覆盖期的 AKShare 按日回退
 ├── handlers.py        # 所有 Telegram 命令处理器（@whitelisted_only/@admin_only）
 ├── jobs.py            # 后台定时任务：check_rules_job、daily_briefing_job
 └── utils.py           # 共享工具：normalize_hist_df()、get_sina_symbol()
@@ -73,7 +73,7 @@ docker-compose up -d --build
 
 - **RSI 算法**: Wilder 平滑（EWM alpha=1/N），复刻同花顺/东财口径，见 `data_fetcher.calculate_rsi_exact()`
 - **复权处理**: 计算复权因子（复权收盘/未复权收盘），将实时价格转换到复权尺度
-- **数据源容灾**: 东方财富为主 → 检测到封禁时自动切换新浪
+- **数据源容灾**: 东方财富请求失败后自动切换新浪；proxy 模式下优先使用免费源
 - **通知去重**: 进入区间后发送 N 次通知（可配），离开区间自动重置计数器
 - **机会评分门控**: 估值缺失、过期或估值分过低时不得升级到 MODERATE 以上
 - **请求成本控制**: 技术历史每日缓存；估值和国债默认缓存 12 小时；代理请求不叠加应用层重试

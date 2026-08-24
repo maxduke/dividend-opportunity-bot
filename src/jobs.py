@@ -4,29 +4,25 @@ import asyncio
 import html
 import logging
 import math
-import random
 import sqlite3
 from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Tuple, Union
+from zoneinfo import ZoneInfo
 
-import pytz
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, RetryAfter
 from telegram.ext import ContextTypes
 
 from .config import (
-    ENABLE_DAILY_BRIEFING,
     ENABLE_INTRADAY_MONITOR,
     ENABLE_OPPORTUNITY_MONITOR,
     HIST_FETCH_DAYS,
     MAX_NOTIFICATIONS_PER_TRIGGER,
-    RANDOM_DELAY_MAX_SECONDS,
     REQUEST_INTERVAL_SECONDS,
     RSI_PERIOD,
     TECHNICAL_HISTORY_DAYS,
 )
-from .database import db_execute
 from .data_fetcher import (
     _fetch_all_spot_data,
     calculate_rsi,
@@ -35,6 +31,7 @@ from .data_fetcher import (
     get_prices_for_rsi,
     history_failure_is_fresh,
 )
+from .database import db_execute
 from .market import is_market_hours, is_trading_day
 from .opportunity import (
     evaluate_opportunity,
@@ -45,6 +42,7 @@ from .opportunity import (
     should_send_opportunity_alert,
     snapshot_should_persist,
 )
+from .utils import split_message
 
 logger = logging.getLogger(__name__)
 
@@ -62,14 +60,14 @@ def _in_range(rsi_value: Union[float, int, None], rsi_min: float, rsi_max: float
 
 
 NotificationEntry = Tuple[sqlite3.Row, float, bool]
-SHANGHAI_TZ = pytz.timezone('Asia/Shanghai')
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _today_shanghai_str(now: datetime = None) -> str:
     """返回上海时区的监控日期字符串。"""
     current = now or datetime.now(SHANGHAI_TZ)
     if current.tzinfo is None:
-        current = SHANGHAI_TZ.localize(current)
+        current = current.replace(tzinfo=SHANGHAI_TZ)
     else:
         current = current.astimezone(SHANGHAI_TZ)
     return current.strftime('%Y-%m-%d')
@@ -145,23 +143,6 @@ def _build_notification_chunks(
     return chunks
 
 
-def _split_message(text: str, max_len: int = 3800) -> list[str]:
-    if len(text) <= max_len:
-        return [text]
-    chunks = []
-    current = ""
-    for line in text.splitlines():
-        candidate = f"{current}\n{line}" if current else line
-        if current and len(candidate) > max_len:
-            chunks.append(current)
-            current = line
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
-
-
 # --- 后台监控任务 ---
 
 async def check_rules_job(context: ContextTypes.DEFAULT_TYPE):
@@ -179,11 +160,6 @@ async def _check_rules_job(context: ContextTypes.DEFAULT_TYPE):
         return
     if not is_market_hours():
         return
-    if RANDOM_DELAY_MAX_SECONDS > 0:
-        delay = random.uniform(0, RANDOM_DELAY_MAX_SECONDS)
-        logger.info(f"应用启动延迟: {delay:.2f}秒")
-        await asyncio.sleep(delay)
-
     logger.info("交易时间，开始执行规则检查...")
     now = datetime.now(SHANGHAI_TZ)
     today_str = _today_shanghai_str(now)
@@ -386,8 +362,6 @@ async def _check_opportunity_rules(context, rules, spot_data, hist_data_cache, n
 
 
 async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
-    if not ENABLE_DAILY_BRIEFING:
-        return
     tz = SHANGHAI_TZ
     now = datetime.now(tz)
     if not is_trading_day(now):
@@ -527,7 +501,7 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
                 message += f"  52W DD: {snapshot.drawdown_52w * 100:.1f}%\n" if snapshot.drawdown_52w is not None else "  52W DD: N/A\n"
                 message += f"  RSI({RSI_PERIOD}): {snapshot.rsi6:.1f}\n\n" if snapshot.rsi6 is not None else f"  RSI({RSI_PERIOD}): N/A\n\n"
         try:
-            for message_chunk in _split_message(message):
+            for message_chunk in split_message(message):
                 await context.bot.send_message(chat_id=user_id, text=message_chunk, parse_mode=ParseMode.HTML)
             logger.info(f"已成功向用户 {user_id} 发送每日简报。")
         except Forbidden:

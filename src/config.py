@@ -41,18 +41,14 @@ OPPORTUNITY_ALERT_COOLDOWN_MINUTES = int(os.getenv('OPPORTUNITY_ALERT_COOLDOWN_M
 OPPORTUNITY_MAX_ALERTS_PER_DAY = int(os.getenv('OPPORTUNITY_MAX_ALERTS_PER_DAY', '1'))
 
 # --- 高级配置 ---
-RANDOM_DELAY_MAX_SECONDS = float(os.getenv('RANDOM_DELAY_MAX_SECONDS', '0'))
 FETCH_FAILURE_THRESHOLD = int(os.getenv('FETCH_FAILURE_THRESHOLD', '5'))
 REQUEST_INTERVAL_SECONDS = float(os.getenv('REQUEST_INTERVAL_SECONDS', '1.0'))
-ENABLE_DAILY_BRIEFING = os.getenv('ENABLE_DAILY_BRIEFING', 'true').lower() == 'true'
 BRIEFING_TIMES_STR = os.getenv('DAILY_BRIEFING_TIMES', '14:50')
 FETCH_RETRY_ATTEMPTS = int(os.getenv('FETCH_RETRY_ATTEMPTS', '3'))
 FETCH_RETRY_DELAY_SECONDS = int(os.getenv('FETCH_RETRY_DELAY_SECONDS', '5'))
 AKSHARE_CALL_TIMEOUT_SECONDS = float(os.getenv('AKSHARE_CALL_TIMEOUT_SECONDS', '15'))
 AKSHARE_PROXY_CALL_TIMEOUT_SECONDS = float(os.getenv('AKSHARE_PROXY_CALL_TIMEOUT_SECONDS', '300'))
 HISTORY_FAILURE_COOLDOWN_MINUTES = float(os.getenv('HISTORY_FAILURE_COOLDOWN_MINUTES', '30'))
-EM_BLOCK_CHECK_INTERVAL_SECONDS = int(os.getenv('EM_BLOCK_CHECK_INTERVAL_SECONDS', '300'))
-EM_BLOCK_CHECK_URL = "https://i.eastmoney.com/websitecaptcha/api/checkuser?callback=wsc_checkuser"
 ENABLE_AKSHARE_PROXY_PATCH = os.getenv('ENABLE_AKSHARE_PROXY_PATCH', 'false').lower() == 'true'
 AKSHARE_PROXY_AUTH_IP = os.getenv('AKSHARE_PROXY_AUTH_IP', '101.201.173.125').strip()
 AKSHARE_PROXY_AUTH_TOKEN = os.getenv('AKSHARE_PROXY_AUTH_TOKEN', '').strip()
@@ -71,7 +67,6 @@ KEY_FAILURE_COUNT = 'fetch_failure_count'
 KEY_FAILURE_SENT = 'failure_notification_sent'
 STOCK_PREFIXES = ('0', '3', '6', '4', '8')
 ETF_PREFIXES = ('5', '1')
-NAME_CACHE_MAX_SIZE = 500
 
 
 def validate_config():
@@ -174,7 +169,6 @@ def log_config():
         f"机会最低估值分: {MIN_VALUATION_SCORE_FOR_OPPORTUNITY}，"
         f"冷却: {OPPORTUNITY_ALERT_COOLDOWN_MINUTES}分钟，每日上限: {OPPORTUNITY_MAX_ALERTS_PER_DAY}"
     )
-    logger.info(f"最大随机延迟: {RANDOM_DELAY_MAX_SECONDS}秒")
     logger.info(f"失败通知阈值: {FETCH_FAILURE_THRESHOLD}次")
     logger.info(f"请求间隔: {REQUEST_INTERVAL_SECONDS}秒")
     logger.info(f"AKShare单次调用超时: {AKSHARE_CALL_TIMEOUT_SECONDS}秒")
@@ -186,7 +180,5 @@ def log_config():
         f"AKShare代理补丁: {'开启' if ENABLE_AKSHARE_PROXY_PATCH else '关闭'}"
         + (f"，内部重试: {AKSHARE_PROXY_RETRY}，快速替换: 关闭" if ENABLE_AKSHARE_PROXY_PATCH else "")
     )
-    logger.info(f"每日简报主开关: {'开启' if ENABLE_DAILY_BRIEFING else '关闭'}")
-    if ENABLE_DAILY_BRIEFING:
-        logger.info(f"每日简报发送时间: {BRIEFING_TIMES_STR} (上海时间)")
+    logger.info(f"每日简报发送时间: {BRIEFING_TIMES_STR} (上海时间)")
     logger.info("--------------------")

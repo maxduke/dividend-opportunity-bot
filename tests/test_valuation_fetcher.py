@@ -22,7 +22,7 @@ def test_csi_normalization_keeps_all_valid_dates():
 
 def test_persist_valuation_saves_every_returned_date(monkeypatch, tmp_path):
     from src import database
-    from src.valuation_fetcher import persist_valuation_rows, get_valuation_history
+    from src.valuation_fetcher import get_valuation_history, persist_valuation_rows
 
     if database._conn is not None:
         database._conn.close()
@@ -106,6 +106,105 @@ def test_sina_fallback_keeps_only_latest_observation(monkeypatch):
     assert source == "sina"
     assert len(result) == 1
     assert result.iloc[0]["cn10y"] == 1.82
+
+
+def test_bond_backfill_starts_seven_days_before_local_valuation(monkeypatch):
+    import asyncio
+    from datetime import date, timedelta
+    from unittest.mock import AsyncMock
+
+    from src import valuation_fetcher
+
+    valuation_dates = [date(2026, 7, 27) + timedelta(days=offset) for offset in range(29)]
+    monkeypatch.setattr(
+        valuation_fetcher,
+        "db_execute",
+        lambda query, *args, **kwargs: [
+            {"valuation_date": value.isoformat()} for value in valuation_dates
+        ],
+    )
+    fetch = AsyncMock(return_value=None)
+    monkeypatch.setattr(valuation_fetcher, "_fetch_primary_bond", fetch)
+
+    assert asyncio.run(valuation_fetcher.backfill_cn10y()) == 0
+    fetch.assert_awaited_once_with(date(2026, 7, 20), date(2026, 8, 24))
+
+
+def test_bond_backfill_extends_history_for_an_earlier_benchmark(monkeypatch):
+    import asyncio
+    from datetime import date, timedelta
+    from unittest.mock import AsyncMock
+
+    from src import valuation_fetcher
+
+    missing_dates = [date(2026, 7, 27) + timedelta(days=offset) for offset in range(5)]
+    monkeypatch.setattr(
+        valuation_fetcher,
+        "db_execute",
+        lambda query, *args, **kwargs: [
+            {"valuation_date": value.isoformat()} for value in missing_dates
+        ],
+    )
+    fetch = AsyncMock(return_value=None)
+    monkeypatch.setattr(valuation_fetcher, "_fetch_primary_bond", fetch)
+
+    assert asyncio.run(valuation_fetcher.backfill_cn10y()) == 0
+    fetch.assert_awaited_once_with(date(2026, 7, 20), date(2026, 7, 31))
+
+
+def test_bond_backfill_skips_network_when_history_already_covers_valuation(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from src import valuation_fetcher
+
+    monkeypatch.setattr(valuation_fetcher, "db_execute", lambda *args, **kwargs: [])
+    fetch = AsyncMock(side_effect=AssertionError("covered history must not refetch"))
+    monkeypatch.setattr(valuation_fetcher, "_fetch_primary_bond", fetch)
+
+    assert asyncio.run(valuation_fetcher.backfill_cn10y()) == 0
+    fetch.assert_not_awaited()
+
+
+def test_bond_backfill_repairs_an_interior_coverage_gap(monkeypatch, tmp_path):
+    import asyncio
+    from datetime import date, timedelta
+    from unittest.mock import AsyncMock
+
+    from src import database, valuation_fetcher
+
+    valuation_dates = [
+        date(2026, 7, 27) + timedelta(days=offset) for offset in range(29)
+    ]
+    bond_dates = [
+        date(2026, 7, 20) + timedelta(days=offset)
+        for offset in range(36)
+        if not 16 <= offset <= 23
+    ]
+    if database._conn is not None:
+        database._conn.close()
+        database._conn = None
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "bond-gap.db"))
+    database.db_init()
+    valuation_fetcher.persist_valuation_rows(
+        "000922",
+        pd.DataFrame(
+            {
+                "日期": valuation_dates,
+                "股息率1": [5.0] * len(valuation_dates),
+                "股息率2": [5.1] * len(valuation_dates),
+            }
+        ),
+    )
+    valuation_fetcher.persist_bond_rows(
+        pd.DataFrame({"日期": bond_dates, "cn10y": [1.8] * len(bond_dates)}),
+        "chinabond",
+    )
+    fetch = AsyncMock(return_value=None)
+    monkeypatch.setattr(valuation_fetcher, "_fetch_primary_bond", fetch)
+
+    assert asyncio.run(valuation_fetcher.backfill_cn10y()) == 0
+    fetch.assert_awaited_once_with(date(2026, 8, 5), date(2026, 8, 12))
 
 
 def test_sina_fallback_does_not_overwrite_chinabond(monkeypatch, tmp_path):

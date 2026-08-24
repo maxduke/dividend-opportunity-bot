@@ -2,11 +2,11 @@
 """Live AKShare smoke test; never imported by the normal CI test suite."""
 
 import argparse
-from importlib.metadata import version
 import multiprocessing as mp
-from pathlib import Path
 import sys
 from datetime import date, timedelta
+from importlib.metadata import version
+from pathlib import Path
 
 import pandas as pd
 
@@ -29,7 +29,7 @@ def _isolated_worker(queue, operation: str, args: tuple):
 
             patch_active = install_data_provider_patch()
             if operation.startswith("proxy_") and not patch_active:
-                queue.put((False, "proxy patch is disabled or balance could not be verified"))
+                queue.put((False, "proxy patch is disabled"))
                 return
 
         import akshare as ak
@@ -96,6 +96,7 @@ def _isolated_worker(queue, operation: str, args: tuple):
 
         if operation == "history":
             import asyncio
+
             from src.data_fetcher import get_history_data
 
             frame = asyncio.run(get_history_data(args[0], 550))
@@ -103,6 +104,7 @@ def _isolated_worker(queue, operation: str, args: tuple):
             queue.put((True, {"rows": 0 if frame is None else len(frame), "valid": valid}))
         elif operation == "price":
             import asyncio
+
             from src.data_fetcher import _fetch_single_realtime_price
 
             price = asyncio.run(_fetch_single_realtime_price(args[0]))
