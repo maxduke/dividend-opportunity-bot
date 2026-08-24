@@ -19,7 +19,7 @@ src/
 ├── metrics.py         # Opportunity 指标与评分纯函数
 ├── scoring_config.py  # 集中的评分阈值
 ├── opportunity.py     # Opportunity 评估、门控、消息格式与告警判断
-├── market.py          # 本地 XSHG 交易日历与交易时间检查
+├── market.py          # XSHG 交易日历与超出覆盖期的 AKShare 按日回退
 ├── handlers.py        # 所有 Telegram 命令处理器（@whitelisted_only/@admin_only）
 ├── jobs.py            # 后台定时任务：check_rules_job、daily_briefing_job
 └── utils.py           # 共享工具：normalize_hist_df()、get_sina_symbol()
