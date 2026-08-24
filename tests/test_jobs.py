@@ -26,3 +26,16 @@ def test_check_job_skips_overlapping_run(monkeypatch):
 
     asyncio.run(exercise())
     runner.assert_awaited_once()
+
+
+def test_intraday_job_stops_before_market_or_data_access_when_disabled(monkeypatch):
+    from src import jobs
+
+    monkeypatch.setattr(jobs, "ENABLE_INTRADAY_MONITOR", False)
+    monkeypatch.setattr(
+        jobs,
+        "is_market_hours",
+        lambda: (_ for _ in ()).throw(AssertionError("market check should not run")),
+    )
+
+    asyncio.run(jobs._check_rules_job(SimpleNamespace(bot_data={})))

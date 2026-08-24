@@ -28,6 +28,7 @@ HIST_FETCH_DAYS = int(os.getenv('HIST_FETCH_DAYS', '200'))
 TECHNICAL_HISTORY_DAYS = int(os.getenv('TECHNICAL_HISTORY_DAYS', '550'))
 MAX_NOTIFICATIONS_PER_TRIGGER = int(os.getenv('MAX_NOTIFICATIONS_PER_TRIGGER', '1'))
 ENABLE_OPPORTUNITY_MONITOR = os.getenv('ENABLE_OPPORTUNITY_MONITOR', 'true').lower() == 'true'
+ENABLE_INTRADAY_MONITOR = os.getenv('ENABLE_INTRADAY_MONITOR', 'false').lower() == 'true'
 VALUATION_CACHE_HOURS = float(os.getenv('VALUATION_CACHE_HOURS', '12'))
 BOND_CACHE_HOURS = float(os.getenv('BOND_CACHE_HOURS', '12'))
 VALUATION_STALE_MAX_DAYS = int(os.getenv('VALUATION_STALE_MAX_DAYS', '7'))
@@ -43,8 +44,8 @@ OPPORTUNITY_MAX_ALERTS_PER_DAY = int(os.getenv('OPPORTUNITY_MAX_ALERTS_PER_DAY',
 RANDOM_DELAY_MAX_SECONDS = float(os.getenv('RANDOM_DELAY_MAX_SECONDS', '0'))
 FETCH_FAILURE_THRESHOLD = int(os.getenv('FETCH_FAILURE_THRESHOLD', '5'))
 REQUEST_INTERVAL_SECONDS = float(os.getenv('REQUEST_INTERVAL_SECONDS', '1.0'))
-ENABLE_DAILY_BRIEFING = os.getenv('ENABLE_DAILY_BRIEFING', 'false').lower() == 'true'
-BRIEFING_TIMES_STR = os.getenv('DAILY_BRIEFING_TIMES', '15:30')
+ENABLE_DAILY_BRIEFING = os.getenv('ENABLE_DAILY_BRIEFING', 'true').lower() == 'true'
+BRIEFING_TIMES_STR = os.getenv('DAILY_BRIEFING_TIMES', '14:50')
 FETCH_RETRY_ATTEMPTS = int(os.getenv('FETCH_RETRY_ATTEMPTS', '3'))
 FETCH_RETRY_DELAY_SECONDS = int(os.getenv('FETCH_RETRY_DELAY_SECONDS', '5'))
 AKSHARE_CALL_TIMEOUT_SECONDS = float(os.getenv('AKSHARE_CALL_TIMEOUT_SECONDS', '15'))
@@ -55,8 +56,7 @@ EM_BLOCK_CHECK_URL = "https://i.eastmoney.com/websitecaptcha/api/checkuser?callb
 ENABLE_AKSHARE_PROXY_PATCH = os.getenv('ENABLE_AKSHARE_PROXY_PATCH', 'false').lower() == 'true'
 AKSHARE_PROXY_AUTH_IP = os.getenv('AKSHARE_PROXY_AUTH_IP', '101.201.173.125').strip()
 AKSHARE_PROXY_AUTH_TOKEN = os.getenv('AKSHARE_PROXY_AUTH_TOKEN', '').strip()
-AKSHARE_PROXY_RETRY = int(os.getenv('AKSHARE_PROXY_RETRY', '1'))
-AKSHARE_PROXY_MAX_RETRY = 3
+AKSHARE_PROXY_RETRY = int(os.getenv('AKSHARE_PROXY_RETRY', '30'))
 AKSHARE_PROXY_HOOK_DOMAINS = os.getenv(
     'AKSHARE_PROXY_HOOK_DOMAINS',
     'push2.eastmoney.com,push2his.eastmoney.com',
@@ -141,11 +141,8 @@ def validate_config():
     if ENABLE_AKSHARE_PROXY_PATCH:
         if not AKSHARE_PROXY_AUTH_TOKEN:
             errors.append("ENABLE_AKSHARE_PROXY_PATCH=true 时必须设置 AKSHARE_PROXY_AUTH_TOKEN")
-        if not 1 <= AKSHARE_PROXY_RETRY <= AKSHARE_PROXY_MAX_RETRY:
-            errors.append(
-                f"AKSHARE_PROXY_RETRY 必须在 1 到 {AKSHARE_PROXY_MAX_RETRY} 之间，"
-                f"当前值: {AKSHARE_PROXY_RETRY}"
-            )
+        if AKSHARE_PROXY_RETRY < 1:
+            errors.append(f"AKSHARE_PROXY_RETRY 必须 >= 1，当前值: {AKSHARE_PROXY_RETRY}")
         if not any(domain.strip() for domain in AKSHARE_PROXY_HOOK_DOMAINS.split(',')):
             errors.append("AKSHARE_PROXY_HOOK_DOMAINS 至少需要一个域名")
 
@@ -166,6 +163,7 @@ def log_config():
     logger.info(f"检查间隔: {CHECK_INTERVAL_SECONDS}秒")
     logger.info(f"数据库文件: {DB_FILE}")
     logger.info(f"机会监控主开关: {'开启' if ENABLE_OPPORTUNITY_MONITOR else '关闭'}")
+    logger.info(f"盘中高频监控: {'开启' if ENABLE_INTRADAY_MONITOR else '关闭'}")
     logger.info(f"估值缓存: {VALUATION_CACHE_HOURS}小时，国债缓存: {BOND_CACHE_HOURS}小时")
     logger.info(f"估值字段: {CSI_DIVIDEND_YIELD_FIELD}，机会告警阈值: {OPPORTUNITY_ALERT_THRESHOLD}")
     logger.info(

@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 
 from .config import (
     ENABLE_DAILY_BRIEFING,
+    ENABLE_INTRADAY_MONITOR,
     ENABLE_OPPORTUNITY_MONITOR,
     HIST_FETCH_DAYS,
     MAX_NOTIFICATIONS_PER_TRIGGER,
@@ -174,6 +175,8 @@ async def check_rules_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _check_rules_job(context: ContextTypes.DEFAULT_TYPE):
+    if not ENABLE_INTRADAY_MONITOR:
+        return
     if not is_market_hours():
         return
     if RANDOM_DELAY_MAX_SECONDS > 0:
@@ -391,7 +394,7 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"今天 ({now.strftime('%Y-%m-%d')}) 非交易日，跳过每日简报。")
         return
 
-    logger.info("开始执行每日收盘监控简报任务...")
+    logger.info("开始执行每日收盘前监控简报任务...")
     enabled_users_rows = db_execute(
         "SELECT user_id FROM whitelist WHERE daily_briefing_enabled = 1", fetchall=True
     )
@@ -480,7 +483,7 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
         rules_by_user[rule['user_id']].append(("opportunity", rule))
 
     for user_id, user_rules in rules_by_user.items():
-        message = f"📰 <b>收盘监控简报 ({today_str_display})</b>\n\n"
+        message = f"📰 <b>收盘前监控简报 ({today_str_display})</b>\n\n"
         rsi_rules = [rule for kind, rule in user_rules if kind == "rsi"]
         opportunity_rules = [rule for kind, rule in user_rules if kind == "opportunity"]
         if rsi_rules:

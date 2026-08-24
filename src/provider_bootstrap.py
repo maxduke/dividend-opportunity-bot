@@ -13,7 +13,6 @@ from .config import (
     AKSHARE_PROXY_AUTH_IP,
     AKSHARE_PROXY_AUTH_TOKEN,
     AKSHARE_PROXY_HOOK_DOMAINS,
-    AKSHARE_PROXY_MAX_RETRY,
     AKSHARE_PROXY_RETRY,
     ENABLE_AKSHARE_PROXY_PATCH,
 )
@@ -32,10 +31,8 @@ def install_data_provider_patch() -> bool:
         raise RuntimeError(
             "AKShare proxy patch enabled but AKSHARE_PROXY_AUTH_IP/TOKEN is missing"
         )
-    if not 1 <= AKSHARE_PROXY_RETRY <= AKSHARE_PROXY_MAX_RETRY:
-        raise RuntimeError(
-            f"AKShare proxy retry must be between 1 and {AKSHARE_PROXY_MAX_RETRY}"
-        )
+    if AKSHARE_PROXY_RETRY < 1:
+        raise RuntimeError("AKShare proxy retry must be at least 1")
     if not _has_positive_balance():
         logger.warning("[AKSHARE] proxy patch not enabled: balance unavailable or non-positive")
         return False

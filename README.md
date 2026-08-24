@@ -9,7 +9,7 @@ Legacy RSI monitoring remains supported；升级不会删除已有 RSI 规则。
 - **多规则监控**: 支持为同一个资产设置多个不同的RSI监控区间。
 - **即时查询**: 用户可随时使用 `/check` 命令，获取所有监控资产的最新RSI值。
 - **红利机会监控**: 将可交易资产技术指标与独立 benchmark 指数估值分离，计算 0–100 Opportunity Score。
-- **每日简报**: 可选功能，在每个交易日收盘后，向开启了此功能的用户推送一份定制化的RSI简报。
+- **收盘前简报**: 默认在每个交易日 14:50，向开启了此功能的用户推送 RSI 与红利机会评分。
 - **白名单**: 只有授权的 Telegram 用户才能与机器人交互。
 - **开盘监控**: 任务仅在中国 A 股交易日及交易时段内运行，自动处理节假日和调休。
 - **高效缓存**: 资产名称和历史数据均有缓存机制，最大限度减少API调用。
@@ -22,7 +22,7 @@ Legacy RSI monitoring remains supported；升级不会删除已有 RSI 规则。
 - `/start` - 开始使用机器人。
 - `/help` - 获取帮助信息。
 - `/check` - 立即查询您所有激活规则的当前RSI值。
-- `/briefing on|off` - 开启或关闭您的每日收盘简报。
+- `/briefing on|off` - 开启或关闭您的每日收盘前简报。
 - `/add <code> <min> <max>` - 添加一条监控规则。
 - `/del <id>` - 删除一条规则。
 - `/list` - 查看您的所有监控规则。
@@ -60,7 +60,8 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 
 | 环境变量                      | 描述                               | 默认值 |
 | ----------------------------- | ---------------------------------- | ------ |
-| `CHECK_INTERVAL_SECONDS`      | 检查规则的间隔时间（秒）.          | `60`   |
+| `CHECK_INTERVAL_SECONDS`      | 启用盘中监控时的规则检查间隔（秒）。 | `60`   |
+| `ENABLE_INTRADAY_MONITOR`     | 是否启用盘中循环及自动告警；场外联接基金建议关闭，场内 ETF 可开启。 | `false` |
 | `RSI_PERIOD`                  | 计算RSI指标的周期.                 | `6`    |
 | `USE_ADJUST`                  | 是否使用前复权价格 (`true`=是, `false`=否)。启用后，会将实时价格按最新交易日的复权因子转换为复权尺度。 | `true` |
 | `HIST_FETCH_DAYS`             | 获取用于计算RSI的历史数据的天数.   | `200`   |
@@ -74,8 +75,8 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 | `RANDOM_DELAY_MAX_SECONDS` | 在每次检查周期开始时，增加一个0到该秒数之间的随机延迟。     | `0`        |
 | `REQUEST_INTERVAL_SECONDS` | 每个API请求之间的固定间隔时间（秒），用于防止接口限制。     | `1.0`      |
 | `FETCH_FAILURE_THRESHOLD`  | 连续获取数据失败多少次后，向管理员发送一条警报通知。         | `5`        |
-| `ENABLE_DAILY_BRIEFING`    | **每日简报的主开关**。设为 `true` 以允许用户使用此功能。     | `false`    |
-| `DAILY_BRIEFING_TIMES`      | 每日简报的发送时间 (上海时间, 24小时制)。支持多个，用逗号分隔。     | `15:30`    |
+| `ENABLE_DAILY_BRIEFING`    | **每日简报的主开关**。设为 `true` 以允许用户使用此功能。     | `true`    |
+| `DAILY_BRIEFING_TIMES`      | 每日简报的发送时间 (上海时间, 24小时制)。支持多个，用逗号分隔。     | `14:50`    |
 | `FETCH_RETRY_ATTEMPTS` | 获取数据失败后的重试次数。     | `3`      |
 | `FETCH_RETRY_DELAY_SECONDS`  | 每次重试之间的等待时间（秒）。         | `5`        |
 | `AKSHARE_CALL_TIMEOUT_SECONDS` | 单次 AKShare 阻塞调用的异步等待上限；超时后进入已有 retry/fallback。 | `15` |
@@ -93,6 +94,8 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 | `OPPORTUNITY_ALERT_COOLDOWN_MINUTES` | 普通机会告警冷却时间。 | `240` |
 | `OPPORTUNITY_MAX_ALERTS_PER_DAY` | 每条机会规则每日普通告警上限；等级升级可覆盖。 | `1` |
 
+场外联接基金的默认模式是 `ENABLE_INTRADAY_MONITOR=false`：60 秒任务会在访问数据源前立即返回，仅在 14:50 简报或手动 `/check`、`/opcheck` 时计算。场内 ETF 需要盘中告警时将该开关设为 `true`。简报还需用户执行一次 `/briefing on`。
+
 ### 可选的东方财富代理
 
 项目默认锁定 AKShare `1.18.87`。如果部署环境频繁触发东方财富限流，可安装并显式开启 `akshare-proxy-patch`：
@@ -100,7 +103,7 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 - `ENABLE_AKSHARE_PROXY_PATCH=false`：默认关闭。
 - 开启时必须设置 `AKSHARE_PROXY_AUTH_TOKEN`；`AKSHARE_PROXY_AUTH_IP` 默认是服务商文档中的 `101.201.173.125`，这里只填写 IP，不要填写端口。token 只放在部署环境，不要提交到仓库。
 - `AKSHARE_PROXY_HOOK_DOMAINS` 只列出需要代理的东方财富域名；新浪、中证、ChinaBond 请求不经过这个补丁。
-- 参考 `fund-alert-bot`，默认 `AKSHARE_PROXY_RETRY=1`、最大允许 `3`，并强制 `fast=False`：patch 独占 EastMoney 重试预算，避免应用层重试和并发分页放大计费请求。服务商示例中的 `retry=30` 不适合长期监控，因为单次失败可能产生大量付费尝试。
+- 按服务商官方示例默认 `AKSHARE_PROXY_RETRY=30`，并强制 `fast=False`；重试次数可配置，失败请求的计费规则以服务商当前条款为准。
 - proxy 模式下，股票和不复权历史先尝试新浪；前复权 ETF 每日只请求一次 EastMoney。历史失败、估值和国债快照均有缓存，监控循环不会每 60 秒重复调用。
 - `fund_name_em()` 使用 `.js` 资源，而补丁会明确绕过 `.js`/`.html`；proxy 模式不调用它，ETF 名称回退为代码，避免产生未代理请求。
 
