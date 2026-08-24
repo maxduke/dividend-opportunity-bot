@@ -383,6 +383,17 @@ async def get_asset_name_with_cache(asset_code: str, context: ContextTypes.DEFAU
 
     async def fetch_name():
         if asset_code.startswith(STOCK_PREFIXES):
+            if ENABLE_AKSHARE_PROXY_PATCH:
+                if not proxy_patch_active():
+                    logger.info("proxy 未激活，跳过股票名称 EastMoney 请求")
+                    return None
+                balance_status = await check_proxy_balance_async()
+                if balance_status.state != POSITIVE:
+                    logger.info(
+                        "proxy 不可用，跳过股票名称 EastMoney 请求 balance_status=%s",
+                        balance_status.state,
+                    )
+                    return None
             info_df = await _call_akshare(
                 ak.stock_individual_info_em,
                 symbol=asset_code,

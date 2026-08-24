@@ -295,6 +295,43 @@ def test_proxy_mode_does_not_call_unproxyable_etf_name_endpoint(monkeypatch):
     assert name == "Asset_510300"
 
 
+def test_unusable_proxy_does_not_call_stock_name_endpoint(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    active = False
+    monkeypatch.setattr(data_fetcher, "proxy_patch_active", lambda: active)
+    balance_check = AsyncMock(
+        return_value=SimpleNamespace(state="NO_BALANCE_OR_INVALID")
+    )
+    monkeypatch.setattr(data_fetcher, "check_proxy_balance_async", balance_check)
+    monkeypatch.setattr(
+        data_fetcher,
+        "_call_akshare",
+        AsyncMock(side_effect=AssertionError("stock name endpoint must not be called")),
+    )
+
+    name = asyncio.run(
+        data_fetcher.get_asset_name_with_cache(
+            "600000", SimpleNamespace(bot_data={})
+        )
+    )
+
+    assert name == "Asset_600000"
+    balance_check.assert_not_awaited()
+
+    active = True
+    name = asyncio.run(
+        data_fetcher.get_asset_name_with_cache(
+            "600001", SimpleNamespace(bot_data={})
+        )
+    )
+
+    assert name == "Asset_600001"
+    balance_check.assert_awaited_once()
+
+
 def test_fresh_persisted_valuation_skips_network(monkeypatch):
     from src import valuation_fetcher
 
