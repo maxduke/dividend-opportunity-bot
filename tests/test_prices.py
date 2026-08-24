@@ -99,6 +99,19 @@ def test_current_day_quote_appends_after_market_open(monkeypatch):
     assert result.spot_used and result.price_date.isoformat() == "2026-08-24"
 
 
+def test_same_day_quote_before_0930_is_rejected(monkeypatch):
+    _trading_day(monkeypatch)
+    result = data_fetcher.build_indicator_close_series(
+        _history(["2026-08-21"], [100]),
+        data_fetcher.RealtimeQuote(101, datetime(2026, 8, 24, 9, 25, tzinfo=TZ)),
+        datetime(2026, 8, 24, 9, 26, tzinfo=TZ),
+    )
+    assert list(result.closes) == [100]
+    assert not result.spot_used
+    assert result.degraded
+    assert "before market open" in result.note
+
+
 def test_current_day_history_is_replaced_without_duplicate(monkeypatch):
     _trading_day(monkeypatch)
     result = data_fetcher.build_indicator_close_series(
