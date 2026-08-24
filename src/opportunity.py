@@ -320,6 +320,9 @@ async def evaluate_opportunity(
         # visible for diagnostics, but let the normal stale gate cap the level.
         stale = True
         notes.append("Valuation date unavailable; freshness cannot be determined")
+    elif valuation_date > now.date():
+        stale = True
+        notes.append("Valuation date is in the future; freshness invalid")
     else:
         try:
             sessions = trading_sessions_elapsed(valuation_date, now.date())
@@ -427,10 +430,7 @@ async def evaluate_opportunity(
         dy_history_complete,
         spread_history_complete,
     )
-    if (
-        data_quality == "OK"
-        and any("adjustment factor unavailable" in note.lower() for note in notes)
-    ):
+    if data_quality == "OK" and indicator_series.degraded:
         data_quality = "DEGRADED"
     if cn10y_source == "sina":
         notes.append("CN10Y source: Sina fallback")

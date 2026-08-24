@@ -87,7 +87,7 @@ Opportunity Score 的 V1 权重固定为：估值 50 分（股息率 30、股息
 python scripts/analyze_scoring.py --asset 515180 --benchmark 000922 --db /app/data/rules.db
 ```
 
-回放从数据库已有的 CSI 估值和 CN10Y 历史起步，并获取 qfq 日线；它只输出分数分布、相关性和 forward-return 描述，不会修改运行时权重。
+回放从数据库已有的 CSI 估值和 CN10Y 历史起步，默认只获取适合历史研究且价格基准稳定的 `hfq` 日线；`--price-adjust qfq` 可用于和运行时对照诊断，但 qfq 会在后续公司行动后重述历史价格。回放只输出分数分布、相关性和 forward-return 描述，不会修改运行时权重。
 
 Opportunity 监控始终使用前复权（`qfq`）价格。原始价格仅可用于展示或数据源诊断，不参与 MA200、52 周回撤或 RSI6 评分。
 
@@ -106,21 +106,37 @@ Opportunity 监控始终使用前复权（`qfq`）价格。原始价格仅可用
 
 ## 🚀 部署与运行
 
-**升级提示**: 不要删除旧的数据库文件 (`./data/rules.db`)。启动时会通过 `CREATE TABLE IF NOT EXISTS` 和增量字段迁移创建 Opportunity 表，原 `rules` / `whitelist` 数据会保留。
+**数据库与升级提示**: 不要删除或重新创建旧的数据库文件 (`./data/rules.db`)。启动时会通过 `CREATE TABLE IF NOT EXISTS` 和增量字段迁移创建 Opportunity 表，原 `rules` / `whitelist` 数据及已有 Opportunity 数据都会保留。
 
 1.  **安装 Docker 和 Docker Compose**。
 2.  **克隆本仓库**。
 3.  **创建并配置 `.env` 文件**。
-4.  **启动机器人**:
+4.  **首次部署准备数据目录**（镜像使用固定的 `appuser` UID/GID `10001:10001`）:
+    ```bash
+    mkdir -p data
+    sudo chown -R 10001:10001 data
+    chmod 700 data
+    ```
+5.  **启动机器人**:
     ```bash
     docker-compose up -d --build
     ```
-5.  **查看日志**: `docker-compose logs -f`
-6.  **停止服务**: `docker-compose down`
+6.  **查看日志**: `docker-compose logs -f`
+7.  **停止服务**: `docker-compose down`
+
+已有部署升级到固定 UID 镜像时，只需迁移一次数据目录所有权；不要删除 `rules.db`:
+
+```bash
+docker compose down
+sudo chown -R 10001:10001 ./data
+docker compose up -d --build
+```
+
+应用在打开 SQLite 前会检查 `/app/data` 是否存在且可写；权限不匹配会立即报错，并提示将 bind-mounted 目录所有权改为 `10001:10001`，不会静默切换到其他数据库路径，也不会在容器内替宿主机执行 `chmod`/`chown`。
 
 ## Database backup
 
-`/app/data/rules.db` 保存逐渐累积的本地历史，包括 CSI 估值、中国十年期国债、Opportunity 快照和历史规则数据。请使用文件系统 / NAS 快照，或定期复制该文件进行备份；机器人不会在应用内自动执行备份。
+`/app/data/rules.db` 保存逐渐累积的本地历史，包括 CSI 估值、中国十年期国债、Opportunity 快照和历史规则数据。升级或迁移权限前请先备份该文件；请使用文件系统 / NAS 快照，或定期复制它进行备份。机器人不会在应用内自动执行备份。
 
 ## 数据源与风险说明
 

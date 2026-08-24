@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import os
 import sqlite3
 import threading
+from pathlib import Path
 from typing import Optional
 
 from .config import ADMIN_USER_ID, DB_FILE
@@ -14,10 +16,29 @@ _conn: Optional[sqlite3.Connection] = None
 _lock = threading.Lock()
 
 
+def _prepare_db_directory() -> Path:
+    """Create and validate the directory used by SQLite before opening it."""
+    db_path = Path(DB_FILE).expanduser()
+    directory = db_path.parent.resolve()
+    error = (
+        f"DB_FILE={DB_FILE} directory={directory} uid={os.getuid()} gid={os.getgid()} "
+        "directory is not writable; ensure the bind-mounted directory ownership "
+        "matches the container user (10001:10001)."
+    )
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PermissionError(error) from exc
+    if not os.access(directory, os.W_OK | os.X_OK):
+        raise PermissionError(error)
+    return db_path
+
+
 def _get_connection() -> sqlite3.Connection:
     global _conn
     if _conn is None:
-        _conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+        db_path = _prepare_db_directory()
+        _conn = sqlite3.connect(db_path, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
         _conn.execute("PRAGMA foreign_keys = ON")
     return _conn
