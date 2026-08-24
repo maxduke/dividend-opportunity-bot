@@ -1,118 +1,164 @@
 # -*- coding: utf-8 -*-
 
-from datetime import datetime, timedelta
-from unittest.mock import patch
+import asyncio
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 
-from src.data_fetcher import _adjust_spot_price, get_prices_for_rsi
+from src import data_fetcher
+from src.opportunity import _parse_datetime
 
-
-class TestAdjustSpotPrice:
-    """测试复权价格调整。"""
-
-    def test_no_adjust_mode(self):
-        """USE_ADJUST=False 时直接返回原始价格。"""
-        df = pd.DataFrame({'收盘': [10.0]})
-        df.attrs['adjust_factor'] = 1.5
-        with patch('src.data_fetcher.USE_ADJUST', False):
-            result = _adjust_spot_price(df, 20.0)
-        assert result == 20.0
-
-    def test_adjust_with_factor(self):
-        """有复权因子时正确相乘。"""
-        df = pd.DataFrame({'收盘': [10.0]})
-        df.attrs['adjust_factor'] = 1.5
-        with patch('src.data_fetcher.USE_ADJUST', True):
-            result = _adjust_spot_price(df, 20.0)
-        assert result == 30.0  # 20.0 * 1.5
-
-    def test_adjust_factor_none(self):
-        """复权因子为 None 时返回原始价格。"""
-        df = pd.DataFrame({'收盘': [10.0]})
-        # 不设置 adjust_factor
-        with patch('src.data_fetcher.USE_ADJUST', True):
-            result = _adjust_spot_price(df, 20.0)
-        assert result == 20.0
-
-    def test_adjust_factor_zero(self):
-        """复权因子为 0 时返回原始价格。"""
-        df = pd.DataFrame({'收盘': [10.0]})
-        df.attrs['adjust_factor'] = 0
-        with patch('src.data_fetcher.USE_ADJUST', True):
-            result = _adjust_spot_price(df, 20.0)
-        assert result == 20.0
-
-    def test_adjust_factor_very_small(self):
-        """很小但非零的复权因子应正常计算。"""
-        df = pd.DataFrame({'收盘': [10.0]})
-        df.attrs['adjust_factor'] = 0.001
-        with patch('src.data_fetcher.USE_ADJUST', True):
-            result = _adjust_spot_price(df, 20.0)
-        assert abs(result - 0.02) < 1e-10
+TZ = ZoneInfo("Asia/Shanghai")
 
 
-class TestGetPricesForRsi:
-    """测试 RSI 价格序列构建。"""
+def _history(dates, closes, *, basis="qfq", factor=1.0):
+    frame = pd.DataFrame({"收盘": closes}, index=pd.to_datetime(dates))
+    frame.attrs["price_basis"] = basis
+    frame.attrs["adjust_factor"] = factor
+    return frame
 
-    def _make_hist_df(self, dates, closes, adjust_factor=None):
-        """构造带日期索引的历史 DataFrame。"""
-        df = pd.DataFrame({'收盘': closes}, index=pd.to_datetime(dates))
-        if adjust_factor is not None:
-            df.attrs['adjust_factor'] = adjust_factor
-        return df
 
-    def test_none_returns_none(self):
-        assert get_prices_for_rsi(None, 10.0) is None
+def _trading_day(monkeypatch):
+    monkeypatch.setattr(data_fetcher, "is_trading_day", lambda now: now.weekday() < 5)
 
-    def test_empty_df_returns_none(self):
-        df = pd.DataFrame()
-        assert get_prices_for_rsi(df, 10.0) is None
 
-    def test_missing_close_column(self):
-        df = pd.DataFrame({'开盘': [10.0]}, index=pd.to_datetime(['2024-01-01']))
-        assert get_prices_for_rsi(df, 10.0) is None
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("2026-08-24T10:00:00+08:00", datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        ("2026-08-24T10:00:00", datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        ("2026-08-24T02:00:00+00:00", datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        ("not-a-date", None),
+        (None, None),
+    ],
+)
+def test_parse_datetime_is_zoneinfo_safe(value, expected):
+    assert _parse_datetime(value) == expected
 
-    def test_appends_today_price(self):
-        """历史数据最后日期早于今天时，应追加今日价格。"""
-        tz = ZoneInfo('Asia/Shanghai')
-        yesterday = (datetime.now(tz) - timedelta(days=1)).strftime('%Y-%m-%d')
-        df = self._make_hist_df(
-            [yesterday],
-            [10.0],
+
+@pytest.mark.parametrize(
+    "frame, expected",
+    [
+        (pd.DataFrame({"close": [10], "day": ["2026-08-24 10:00:00"]}), datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        (pd.DataFrame({"close": [10], "datetime": ["2026-08-24T10:00:00+00:00"]}), datetime(2026, 8, 24, 18, tzinfo=TZ)),
+        (pd.DataFrame({"close": [10], "日期时间": ["2026-08-24 10:00:00"]}), datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        (pd.DataFrame({"close": [10]}, index=["2026-08-24 10:00:00"]), datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        (pd.DataFrame({"close": [10], "unknown": ["yesterday"]}), None),
+    ],
+)
+def test_realtime_timestamp_extraction_supports_provider_variants(frame, expected):
+    assert data_fetcher._extract_realtime_timestamp(frame, frame.iloc[-1]) == expected
+
+
+def test_realtime_quote_fetch_preserves_provider_timestamp(monkeypatch):
+    frame = pd.DataFrame({"close": [101.5], "day": ["2026-08-24 10:00:00"]})
+
+    async def fake_call(*args, **kwargs):
+        return frame
+
+    monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
+    quote = asyncio.run(data_fetcher._fetch_single_realtime_quote("510300"))
+    assert quote == data_fetcher.RealtimeQuote(101.5, datetime(2026, 8, 24, 10, tzinfo=TZ))
+
+
+def test_friday_history_saturday_query_does_not_create_bar(monkeypatch):
+    _trading_day(monkeypatch)
+    result = data_fetcher.build_indicator_close_series(
+        _history(["2026-08-21"], [100]),
+        data_fetcher.RealtimeQuote(101, datetime(2026, 8, 21, 15, tzinfo=TZ)),
+        datetime(2026, 8, 22, 10, tzinfo=TZ),
+    )
+    assert list(result.closes.index.date) == [pd.Timestamp("2026-08-21").date()]
+    assert not result.spot_used
+    assert result.price_date.isoformat() == "2026-08-21"
+
+
+def test_monday_preopen_does_not_create_bar_from_stale_quote(monkeypatch):
+    _trading_day(monkeypatch)
+    result = data_fetcher.build_indicator_close_series(
+        _history(["2026-08-21"], [100]),
+        data_fetcher.RealtimeQuote(101, None),
+        datetime(2026, 8, 24, 8, 30, tzinfo=TZ),
+    )
+    assert len(result.closes) == 1
+    assert not result.spot_used
+
+
+def test_current_day_quote_appends_after_market_open(monkeypatch):
+    _trading_day(monkeypatch)
+    result = data_fetcher.build_indicator_close_series(
+        _history(["2026-08-21"], [100]),
+        data_fetcher.RealtimeQuote(101, datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        datetime(2026, 8, 24, 10, 1, tzinfo=TZ),
+    )
+    assert list(result.closes) == [100, 101]
+    assert result.spot_used and result.price_date.isoformat() == "2026-08-24"
+
+
+def test_current_day_history_is_replaced_without_duplicate(monkeypatch):
+    _trading_day(monkeypatch)
+    result = data_fetcher.build_indicator_close_series(
+        _history(["2026-08-24"], [100]),
+        data_fetcher.RealtimeQuote(101, datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        datetime(2026, 8, 24, 10, 1, tzinfo=TZ),
+    )
+    assert len(result.closes) == 1
+    assert result.closes.iloc[0] == 101
+
+
+def test_stale_previous_day_quote_is_not_treated_as_today(monkeypatch):
+    _trading_day(monkeypatch)
+    result = data_fetcher.build_indicator_close_series(
+        _history(["2026-08-21"], [100]),
+        data_fetcher.RealtimeQuote(101, datetime(2026, 8, 21, 15, tzinfo=TZ)),
+        datetime(2026, 8, 24, 10, tzinfo=TZ),
+    )
+    assert len(result.closes) == 1
+    assert result.closes.iloc[0] == 100
+    assert not result.spot_used
+
+
+def test_timestamp_less_quote_is_allowed_after_market_open(monkeypatch):
+    _trading_day(monkeypatch)
+    result = data_fetcher.build_indicator_close_series(
+        _history(["2026-08-21"], [100]),
+        data_fetcher.RealtimeQuote(101, None),
+        datetime(2026, 8, 24, 9, 30, tzinfo=TZ),
+    )
+    assert result.spot_used
+    assert result.closes.iloc[-1] == 101
+
+
+def test_missing_adjustment_factor_keeps_confirmed_qfq_close(monkeypatch):
+    _trading_day(monkeypatch)
+    result = data_fetcher.build_indicator_close_series(
+        _history(["2026-08-21"], [100], factor=None),
+        data_fetcher.RealtimeQuote(101, datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        datetime(2026, 8, 24, 10, tzinfo=TZ),
+    )
+    assert list(result.closes) == [100]
+    assert not result.spot_used
+    assert "adjustment factor unavailable" in result.note
+
+
+def test_unadjusted_fallback_disables_all_technical_scores(monkeypatch):
+    from src.opportunity import evaluate_opportunity
+
+    history = _history(pd.date_range("2025-01-01", periods=300), [100] * 300, basis="unadjusted_fallback")
+    monkeypatch.setattr(
+        "src.opportunity.get_cached_valuation", AsyncMock(return_value=None)
+    )
+    snapshot = asyncio.run(
+        evaluate_opportunity(
+            {"id": 1, "asset_code": "510300", "asset_name": "ETF", "benchmark_code": "000922", "benchmark_name": "红利", "min_score": 60},
+            SimpleNamespace(bot_data={}),
+            spot_price=101,
+            hist_df=history,
         )
-        with patch('src.data_fetcher.USE_ADJUST', False):
-            result = get_prices_for_rsi(df, 15.0)
-        assert result is not None
-        assert len(result) == 2
-        assert result.iloc[-1] == 15.0
-
-    def test_replaces_today_price(self):
-        """历史数据包含今日时，应替换最后一个值。"""
-        tz = ZoneInfo('Asia/Shanghai')
-        today = datetime.now(tz).strftime('%Y-%m-%d')
-        df = self._make_hist_df(
-            [today],
-            [10.0],
-        )
-        with patch('src.data_fetcher.USE_ADJUST', False):
-            result = get_prices_for_rsi(df, 15.0)
-        assert result is not None
-        assert len(result) == 1
-        assert result.iloc[-1] == 15.0
-
-    def test_preserves_history(self):
-        """历史数据不应被修改。"""
-        tz = ZoneInfo('Asia/Shanghai')
-        yesterday = (datetime.now(tz) - timedelta(days=2)).strftime('%Y-%m-%d')
-        day_before = (datetime.now(tz) - timedelta(days=3)).strftime('%Y-%m-%d')
-        df = self._make_hist_df(
-            [day_before, yesterday],
-            [10.0, 12.0],
-        )
-        with patch('src.data_fetcher.USE_ADJUST', False):
-            result = get_prices_for_rsi(df, 15.0)
-        assert result is not None
-        assert result.iloc[0] == 10.0
-        assert result.iloc[1] == 12.0
+    )
+    assert snapshot.ma200 is None and snapshot.high_52w is None and snapshot.rsi6 is None
+    assert snapshot.long_term_score == snapshot.tactical_score == 0

@@ -171,6 +171,7 @@ def classify_opportunity_level(
     valuation_score: float = 50,
     stale_valuation: bool = False,
     min_valuation_score: float = 20,
+    scoring_mode: str = "PERCENTILE",
 ) -> str:
     score = _clamp_score(total_score, 100)
     level = "NEUTRAL"
@@ -180,6 +181,10 @@ def classify_opportunity_level(
     if not valuation_available or stale_valuation or valuation_score < min_valuation_score:
         if level in {"MODERATE", "STRONG", "RARE"}:
             return "WATCH"
+    if scoring_mode == "NONE" and level in {"MODERATE", "STRONG", "RARE"}:
+        return "WATCH"
+    if scoring_mode in {"MIXED", "ABSOLUTE_FALLBACK"} and level == "RARE":
+        return "STRONG"
     return level
 
 

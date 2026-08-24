@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from src import market
@@ -46,3 +46,23 @@ def test_calendar_provider_failure_retries_after_short_cooldown(monkeypatch):
     assert not market.is_trading_day(check_date)
     cache["failed_at"] -= market.CALENDAR_FAILURE_RETRY
     assert market.is_trading_day(check_date)
+
+
+def test_trading_sessions_elapsed_skips_national_day_holiday():
+    assert market.trading_sessions_elapsed(date(2024, 9, 30), date(2024, 10, 8)) == 1
+
+
+def test_trading_sessions_elapsed_counts_four_sessions_after_holiday():
+    assert market.trading_sessions_elapsed(date(2024, 10, 8), date(2024, 10, 14)) == 4
+
+
+def test_trading_sessions_elapsed_returns_none_when_provider_calendar_unavailable(monkeypatch):
+    target = date(2026, 8, 24)
+    monkeypatch.setattr(market, "_load_trade_days_from_ak", lambda: None)
+    monkeypatch.setattr(
+        market,
+        "_trade_day_cache",
+        {"days": None, "loaded_on": None, "failed_at": None},
+    )
+    monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
+    assert market.trading_sessions_elapsed(target - timedelta(days=1), target) is None

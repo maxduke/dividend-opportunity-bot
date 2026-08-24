@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Union
+import math
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from typing import Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
 import akshare as ak
@@ -27,16 +29,227 @@ from .config import (
     KEY_HIST_CACHE,
     KEY_HIST_FAILURE_CACHE,
     KEY_NAME_CACHE,
+    PRICE_ADJUSTMENT,
     REQUEST_INTERVAL_SECONDS,
     RSI_PERIOD,
     STOCK_PREFIXES,
     TECHNICAL_HISTORY_DAYS,
-    USE_ADJUST,
 )
+from .market import is_trading_day
 from .utils import get_sina_symbol, normalize_hist_df
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+@dataclass(frozen=True)
+class RealtimeQuote:
+    """A provider quote together with the observation time, when available."""
+
+    price: float
+    timestamp: Optional[datetime] = None
+
+
+@dataclass
+class IndicatorPriceSeries:
+    """Price observations used by technical indicators.
+
+    ``closes`` never contains a synthetic non-trading-day observation.  When
+    a quote cannot be put on the adjusted-price scale, the latest confirmed
+    historical close is retained instead.
+    """
+
+    closes: pd.Series
+    current_price: Optional[float]
+    price_date: Optional[date]
+    spot_used: bool
+    note: Optional[str] = None
+
+
+def _to_shanghai_datetime(value) -> Optional[datetime]:
+    """Parse a provider timestamp without allowing timezone exceptions out."""
+    if value is None or (not isinstance(value, (datetime, pd.Timestamp)) and pd.isna(value)):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, pd.Timestamp):
+            parsed = value.to_pydatetime()
+        elif isinstance(value, datetime):
+            parsed = value
+        else:
+            text = str(value).strip()
+            # A bare minute ``time`` has no session date and must not be
+            # silently assigned today's date by pandas.
+            if len(text) <= 8 and text.count(":") >= 1:
+                return None
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError, OverflowError):
+        try:
+            parsed = pd.to_datetime(value, errors="coerce").to_pydatetime()
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            return None
+    if parsed is None or pd.isna(parsed):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=SHANGHAI_TZ)
+    return parsed.astimezone(SHANGHAI_TZ)
+
+
+def _extract_realtime_timestamp(frame: pd.DataFrame, row) -> Optional[datetime]:
+    """Extract the last-minute timestamp across AKShare's known schemas."""
+    candidates = (
+        "day", "datetime", "date", "time", "date_time",
+        "日期时间", "日期", "时间", "日期时间戳",
+    )
+    columns = {str(column).lower(): column for column in frame.columns}
+    for name in candidates:
+        column = columns.get(name.lower())
+        if column is None:
+            continue
+        timestamp = _to_shanghai_datetime(row[column])
+        if timestamp is not None:
+            return timestamp
+    try:
+        return _to_shanghai_datetime(frame.index[-1])
+    except (IndexError, KeyError):
+        return None
+
+
+def _quote_from_value(quote) -> Optional[RealtimeQuote]:
+    """Accept a quote object and old float callers at one compatibility edge."""
+    if isinstance(quote, RealtimeQuote):
+        try:
+            price = float(quote.price)
+        except (TypeError, ValueError):
+            return None
+        return quote if math.isfinite(price) and price > 0 else None
+    try:
+        price = float(quote)
+    except (TypeError, ValueError):
+        return None
+    return RealtimeQuote(price, None) if math.isfinite(price) and price > 0 else None
+
+
+def _is_trading_day(now: datetime) -> bool:
+    """Use the existing XSHG calendar, with a safe weekday fallback on failure."""
+    try:
+        return bool(is_trading_day(now))
+    except Exception as exc:
+        # Calendar outages must not manufacture a bar on an obvious weekend.
+        logger.warning("交易日历不可用，使用工作日保守回退: %s", exc)
+        return False
+
+
+def build_indicator_close_series(
+    hist_df: Optional[pd.DataFrame],
+    quote: Optional[RealtimeQuote],
+    now: Optional[datetime] = None,
+) -> IndicatorPriceSeries:
+    """Build an adjusted close series without inventing a daily bar.
+
+    A quote is injected only when its timestamp identifies today's traded
+    session (or, for timestamp-less legacy providers, after 09:30 on a
+    trading day) and its raw-to-qfq factor is known and valid.
+    """
+    current = now or datetime.now(SHANGHAI_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=SHANGHAI_TZ)
+    else:
+        current = current.astimezone(SHANGHAI_TZ)
+    today = current.date()
+
+    if hist_df is None or hist_df.empty or "收盘" not in hist_df.columns:
+        return IndicatorPriceSeries(pd.Series(dtype=float), None, None, False, "Adjusted history unavailable")
+
+    closes = pd.to_numeric(hist_df["收盘"], errors="coerce").dropna().copy()
+    if closes.empty:
+        return IndicatorPriceSeries(pd.Series(dtype=float), None, None, False, "Adjusted history unavailable")
+    try:
+        closes.index = pd.to_datetime(closes.index)
+        closes = closes.sort_index()
+    except (TypeError, ValueError):
+        return IndicatorPriceSeries(pd.Series(dtype=float), None, None, False, "Adjusted history unavailable")
+
+    latest_index = closes.index[-1]
+    if getattr(latest_index, "tzinfo", None) is not None:
+        latest_date = latest_index.tz_convert(SHANGHAI_TZ).date()
+    else:
+        latest_date = latest_index.date()
+    latest_price = float(closes.iloc[-1])
+    quote_obj = _quote_from_value(quote)
+    trading_today = _is_trading_day(current)
+    quote_time = _to_shanghai_datetime(quote_obj.timestamp) if quote_obj else None
+    quote_is_today = bool(
+        quote_time is not None
+        and quote_time.date() == today
+        and quote_time <= current
+        and trading_today
+    )
+
+    basis = hist_df.attrs.get("price_basis")
+    factor = hist_df.attrs.get("adjust_factor")
+    try:
+        factor_value = float(factor)
+    except (TypeError, ValueError):
+        factor_value = None
+    factor_valid = factor_value is not None and math.isfinite(factor_value) and factor_value > 0
+    adjusted_history = basis == "qfq"
+    if not adjusted_history:
+        note = (
+            "Adjusted ETF history unavailable; technical price basis is unavailable"
+            if basis == "unadjusted_fallback"
+            else "Adjusted history unavailable; technical price basis is unavailable"
+        )
+        return IndicatorPriceSeries(closes, latest_price, latest_date, False, note)
+
+    if quote_obj is not None and quote_is_today:
+        if factor_valid:
+            adjusted_price = quote_obj.price * factor_value
+            if math.isfinite(adjusted_price) and adjusted_price > 0:
+                if latest_date == today:
+                    closes.iloc[-1] = adjusted_price
+                else:
+                    closes.loc[pd.Timestamp(today)] = adjusted_price
+                    closes = closes.sort_index()
+                return IndicatorPriceSeries(closes, adjusted_price, today, True, None)
+        return IndicatorPriceSeries(
+            closes,
+            latest_price,
+            latest_date,
+            False,
+            "Realtime adjustment factor unavailable; using the latest confirmed adjusted close",
+        )
+
+    if quote_obj is not None and quote_obj.timestamp is None and trading_today and current.time() >= time(9, 30):
+        if factor_valid:
+            adjusted_price = quote_obj.price * factor_value
+            if math.isfinite(adjusted_price) and adjusted_price > 0:
+                if latest_date == today:
+                    closes.iloc[-1] = adjusted_price
+                else:
+                    closes.loc[pd.Timestamp(today)] = adjusted_price
+                    closes = closes.sort_index()
+                return IndicatorPriceSeries(closes, adjusted_price, today, True, None)
+        return IndicatorPriceSeries(
+            closes,
+            latest_price,
+            latest_date,
+            False,
+            "Realtime adjustment factor unavailable; using the latest confirmed adjusted close",
+        )
+
+    if latest_date == today:
+        return IndicatorPriceSeries(closes, latest_price, latest_date, False, None)
+
+    note = None
+    if quote_obj is not None and quote_time is not None and quote_time.date() != today:
+        note = "Realtime quote belongs to a previous session; using the latest confirmed adjusted close"
+    elif quote_obj is not None and not trading_today:
+        note = "Today is not a trading session; using the latest confirmed adjusted close"
+    elif quote_obj is not None and current.time() < time(9, 30):
+        note = "Market has not opened; using the latest confirmed adjusted close"
+    return IndicatorPriceSeries(closes, latest_price, latest_date, False, note)
 
 
 # --- 重试逻辑（改进5: 指数退避） ---
@@ -58,7 +271,11 @@ async def _run_with_retries(operation, description: str, attempts: int = None):
 
 
 async def _call_akshare(function, *args, timeout_seconds=None, **kwargs):
-    """Run a blocking provider call without blocking the bot event loop."""
+    """Run a blocking provider call without blocking the bot event loop.
+
+    ``wait_for`` limits how long the application waits; it cannot forcibly
+    terminate an already-running Python worker thread.
+    """
     timeout = AKSHARE_CALL_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     try:
         return await asyncio.wait_for(
@@ -191,7 +408,7 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
         today = datetime.now()
         start_date = (today - timedelta(days=days)).strftime('%Y%m%d')
         end_date = today.strftime('%Y%m%d')
-        adjust = "qfq" if USE_ADJUST else ""
+        adjust = PRICE_ADJUSTMENT
 
         async def fetch_hist_em():
             try:
@@ -247,9 +464,7 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
 
         df = None
         source = "sina"
-        proxy_can_use_free_history = not (
-            USE_ADJUST and asset_code.startswith(ETF_PREFIXES)
-        )
+        proxy_can_use_free_history = not asset_code.startswith(ETF_PREFIXES)
         if ENABLE_AKSHARE_PROXY_PATCH and proxy_can_use_free_history:
             # Sina is not in the proxy hook list. Use it first and pay for
             # EastMoney only when Sina is unavailable or too short. Adjusted
@@ -268,7 +483,11 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
                     df = em_df
                     source = "em"
         else:
-            df = await _run_with_retries(fetch_hist_em, f"获取历史数据({asset_code})")
+            df = await _run_with_retries(
+                fetch_hist_em,
+                f"获取历史数据({asset_code})",
+                attempts=_em_retry_attempts(),
+            )
             source = "em"
         # Bug3: 统一使用 is None or empty 判断
         if not history_is_sufficient(df, days):
@@ -286,16 +505,13 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
             return None
         df.set_index("日期", inplace=True)
         df.attrs["technical_history_days"] = days
-        if USE_ADJUST:
-            if source == "sina" and asset_code.startswith(ETF_PREFIXES):
-                logger.info(f"ETF({asset_code}) 使用新浪历史数据，仅能提供不复权数据。")
-                df.attrs["adjust_factor"] = 1.0
-                df.attrs["price_basis"] = "unadjusted_fallback"
-            else:
-                df.attrs['adjust_factor'] = await _get_adjust_factor(asset_code, df)
-                df.attrs["price_basis"] = "qfq"
+        if source == "sina" and asset_code.startswith(ETF_PREFIXES):
+            logger.info(f"ETF({asset_code}) 使用新浪历史数据，仅能提供不复权数据。")
+            df.attrs["adjust_factor"] = None
+            df.attrs["price_basis"] = "unadjusted_fallback"
         else:
-            df.attrs["price_basis"] = "unadjusted"
+            df.attrs['adjust_factor'] = await _get_adjust_factor(asset_code, df)
+            df.attrs["price_basis"] = "qfq"
         return df
     except Exception as e:
         logger.error(f"获取 {asset_code} 历史数据失败: {e}")
@@ -333,16 +549,18 @@ async def get_history_data_cached(
     return fetched
 
 
-async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
+async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> Optional[float]:
     """
     计算复权因子（复权收盘 / 未复权收盘），用于将实时价格转换到复权尺度。
-    若无法计算，则返回 1.0。
+    若无法可靠计算，则返回 ``None``，避免把原始价格混入复权序列。
     """
     try:
-        base_date = hist_df.index[-1]
+        if hist_df is None or hist_df.empty or "收盘" not in hist_df.columns:
+            return None
+        base_date = pd.Timestamp(hist_df.index[-1])
         today_date = datetime.now(SHANGHAI_TZ).date()
         if base_date.date() >= today_date and len(hist_df.index) > 1:
-            base_date = hist_df.index[-2]
+            base_date = pd.Timestamp(hist_df.index[-2])
         raw_start = (base_date - timedelta(days=30)).strftime('%Y%m%d')
         raw_end = (base_date + timedelta(days=1)).strftime('%Y%m%d')
 
@@ -402,7 +620,7 @@ async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
         raw_df = None
         sina_attempted = False
 
-        prefer_sina_for_etf_raw = USE_ADJUST and asset_code.startswith(ETF_PREFIXES)
+        prefer_sina_for_etf_raw = asset_code.startswith(ETF_PREFIXES)
         if ENABLE_AKSHARE_PROXY_PATCH or prefer_sina_for_etf_raw:
             sina_attempted = True
             raw_df = await _run_with_retries(fetch_raw_hist_sina, f"获取未复权数据-新浪({asset_code})")
@@ -418,10 +636,10 @@ async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
             logger.info(f"尝试使用新浪接口获取未复权数据({asset_code})。")
             raw_df = await _run_with_retries(fetch_raw_hist_sina, f"获取未复权数据-新浪({asset_code})")
         if raw_df is None or raw_df.empty:
-            return 1.0
+            return None
         raw_df = normalize_hist_df(raw_df)
         if raw_df is None or raw_df.empty or "日期" not in raw_df.columns:
-            return 1.0
+            return None
         raw_df.set_index('日期', inplace=True)
 
         base_ts = pd.Timestamp(base_date)
@@ -430,70 +648,84 @@ async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
         common_dates = raw_idx.intersection(adj_idx)
         candidate_dates = common_dates[common_dates <= base_ts]
         if candidate_dates.empty:
-            return 1.0
+            return None
         aligned_date = candidate_dates.max()
 
         raw_close = raw_df.loc[aligned_date, '收盘']
-        # Bug6: 使用 pd.isna 检测 NaN
-        if pd.isna(raw_close) or raw_close == 0:
-            return 1.0
         adjusted_close = hist_df.loc[aligned_date, '收盘']
-        return float(adjusted_close) / float(raw_close)
+        if isinstance(raw_close, pd.Series):
+            raw_close = raw_close.iloc[-1]
+        if isinstance(adjusted_close, pd.Series):
+            adjusted_close = adjusted_close.iloc[-1]
+        if pd.isna(raw_close) or pd.isna(adjusted_close):
+            return None
+        raw_value = float(raw_close)
+        adjusted_value = float(adjusted_close)
+        if not math.isfinite(raw_value) or not math.isfinite(adjusted_value):
+            return None
+        if raw_value <= 0 or adjusted_value <= 0:
+            return None
+        factor = adjusted_value / raw_value
+        return factor if math.isfinite(factor) and factor > 0 else None
     except Exception as e:
         logger.warning(f"计算复权因子失败({asset_code}): {e}")
-        return 1.0
-
-
-def _adjust_spot_price(hist_df: pd.DataFrame, spot_price: float) -> float:
-    """将实时价格调整到与历史复权数据一致的价格尺度。"""
-    if not USE_ADJUST:
-        return float(spot_price)
-    adjust_factor = hist_df.attrs.get('adjust_factor')
-    # Bug5: 明确检查 None 和 0
-    if adjust_factor is None or adjust_factor == 0:
-        return float(spot_price)
-    return float(spot_price) * float(adjust_factor)
+        return None
 
 
 # --- 实时价格获取 ---
 
-async def _fetch_single_realtime_price(code: str) -> Union[float, None]:
-    """通过新浪分时接口获取最新价 (最稳健)"""
+async def _fetch_single_realtime_quote(code: str) -> Optional[RealtimeQuote]:
+    """通过新浪分时接口获取最新报价及其观测时间。"""
     sina_symbol = get_sina_symbol(code)
 
-    async def fetch_price():
+    async def fetch_quote():
         try:
             df = await _call_akshare(ak.stock_zh_a_minute, symbol=sina_symbol, period='1')
             if df is not None and not df.empty:
-                return float(df.iloc[-1]['close'])
+                row = df.iloc[-1]
+                close_column = next(
+                    (column for column in ("close", "收盘") if column in df.columns),
+                    None,
+                )
+                if close_column is None:
+                    return None
+                price = float(row[close_column])
+                if not math.isfinite(price) or price <= 0:
+                    return None
+                return RealtimeQuote(price, _extract_realtime_timestamp(df, row))
         except asyncio.TimeoutError:
             logger.warning(f"获取 {code} 实时价格超时")
         except Exception as e:
             logger.warning(f"获取 {code} 实时价格失败: {e}")
         return None
 
-    return await _run_with_retries(fetch_price, f"获取实时价格({code})")
+    return await _run_with_retries(fetch_quote, f"获取实时价格({code})")
 
 
-async def _fetch_all_spot_data(context: ContextTypes.DEFAULT_TYPE, codes: List[str]) -> Tuple[Dict, bool]:
-    """获取实时数据，逐个获取以保证稳定性。"""
-    spot_dict = {}
-    success_count = 0
+async def _fetch_single_realtime_price(code: str) -> Union[float, None]:
+    """Compatibility wrapper; the provider is called exactly once per attempt."""
+    quote = await _fetch_single_realtime_quote(code)
+    return quote.price if quote is not None else None
 
+
+async def _fetch_all_realtime_quotes(
+    context: ContextTypes.DEFAULT_TYPE,
+    codes: List[str],
+) -> Tuple[Dict[str, RealtimeQuote], bool]:
+    """Fetch timestamp-preserving quotes while retaining existing failure state."""
+    quote_dict: Dict[str, RealtimeQuote] = {}
     for code in codes:
         await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
-        price = await _fetch_single_realtime_price(code)
-        if price is not None:
-            spot_dict[code] = price
-            success_count += 1
+        quote = await _fetch_single_realtime_quote(code)
+        if quote is not None:
+            quote_dict[code] = quote
 
-    if success_count == 0 and len(codes) > 0:
+    if not quote_dict and codes:
         logger.warning("本次未获取到任何有效价格。")
         context.bot_data[KEY_FAILURE_COUNT] = context.bot_data.get(KEY_FAILURE_COUNT, 0) + 1
         count = context.bot_data[KEY_FAILURE_COUNT]
-
         if count >= FETCH_FAILURE_THRESHOLD and not context.bot_data.get(KEY_FAILURE_SENT) and ADMIN_USER_ID:
-            admin_message = (f"🚨 **机器人警报** 🚨\n\n连续获取数据失败已达 **{count}** 次。\n请检查新浪接口连通性。")
+            admin_message = f"🚨 **机器人警报** 🚨\n\n连续获取数据失败已达 **{count}** 次。\n请检查新浪接口连通性。"
             try:
                 await context.bot.send_message(chat_id=ADMIN_USER_ID, text=admin_message, parse_mode=ParseMode.MARKDOWN)
                 logger.warning("已向管理员发送数据获取失败的警报通知。")
@@ -506,60 +738,38 @@ async def _fetch_all_spot_data(context: ContextTypes.DEFAULT_TYPE, codes: List[s
         logger.info("数据获取成功，重置失败计数器。")
     context.bot_data[KEY_FAILURE_COUNT] = 0
     context.bot_data[KEY_FAILURE_SENT] = False
-    return spot_dict, True
+    return quote_dict, True
 
 
 # --- RSI 计算 ---
 
-def get_prices_for_rsi(hist_df: pd.DataFrame, spot_price: float) -> Union[pd.Series, None]:
-    """根据历史和实时价格准备用于 RSI 计算的价格序列。"""
-    if hist_df is None or hist_df.empty:
-        return None
-    if '收盘' not in hist_df.columns:
-        return None
-    close_prices = hist_df['收盘'].copy()
-    last_date_in_hist = close_prices.index[-1].date()
-    today_date = datetime.now(SHANGHAI_TZ).date()
-    adjusted_spot_price = _adjust_spot_price(hist_df, spot_price)
-    if last_date_in_hist < today_date:
-        close_prices.loc[pd.Timestamp(today_date)] = adjusted_spot_price
-    else:
-        close_prices.iloc[-1] = adjusted_spot_price
-    return close_prices
-
-
-def calculate_rsi_exact(prices: pd.Series, period: int = 6) -> Union[float, None]:
-    """
-    完全复刻同花顺/东财算法的 RSI 计算函数。
-    使用 pandas 原生 ewm(alpha=1/N) 实现 Wilder 平滑。
-    """
+def calculate_rsi_wilder(prices: pd.Series, period: int = 6) -> Union[float, None]:
+    """Calculate RSI with recursive Wilder (Chinese ``SMA(X,N,1)``) smoothing."""
     try:
-        if len(prices) < period + 1:
+        if period <= 0 or prices is None:
             return None
-
-        delta = prices.diff()
+        values = pd.to_numeric(pd.Series(prices), errors="coerce").dropna()
+        if len(values) < period + 1:
+            return None
+        delta = values.diff()
         gain = delta.clip(lower=0)
         loss = -1 * delta.clip(upper=0)
-
-        avg_gain = gain.ewm(alpha=1 / period, adjust=True).mean()
-        avg_loss = loss.ewm(alpha=1 / period, adjust=True).mean()
-
-        # Bug2: 除零保护 — avg_loss 为 0 时 RSI 定义为 100
-        last_avg_loss = avg_loss.iloc[-1]
-        if last_avg_loss == 0:
-            return 100.0
-
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-
-        result = rsi.iloc[-1]
-        if pd.isna(result):
+        avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean().iloc[-1]
+        avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean().iloc[-1]
+        if pd.isna(avg_gain) or pd.isna(avg_loss):
             return None
-        return round(float(result), 2)
+        if avg_gain == 0 and avg_loss == 0:
+            return 50.0
+        if avg_loss == 0:
+            return 100.0
+        if avg_gain == 0:
+            return 0.0
+        result = 100 - (100 / (1 + avg_gain / avg_loss))
+        return round(float(result), 2) if math.isfinite(result) else None
     except Exception as e:
         logger.error(f"RSI计算出错: {e}")
         return None
 
 
 def calculate_rsi(prices: pd.Series) -> Union[float, None]:
-    return calculate_rsi_exact(prices, period=RSI_PERIOD)
+    return calculate_rsi_wilder(prices, period=RSI_PERIOD)

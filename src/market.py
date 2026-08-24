@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import akshare as ak
@@ -54,6 +54,39 @@ def is_trading_day(check_date: datetime) -> bool:
 
     trade_days = _trade_day_cache["days"]
     return isinstance(trade_days, set) and cn_date in trade_days
+
+
+def trading_sessions_elapsed(start_date: date, end_date: date) -> int | None:
+    """Count XSHG sessions after ``start_date`` through ``end_date``.
+
+    ``None`` means that the calendar could not be established for the whole
+    interval.  The existing local XSHG calendar and trade-day provider cache
+    are deliberately reused; no additional provider/retry loop is introduced.
+    """
+    if isinstance(start_date, datetime):
+        start_date = start_date.date()
+    if isinstance(end_date, datetime):
+        end_date = end_date.date()
+    if start_date > end_date:
+        return None
+
+    sessions = 0
+    cursor = start_date + timedelta(days=1)
+    while cursor <= end_date:
+        # Weekends are known non-sessions without consulting a provider.
+        if cursor.weekday() < 5:
+            is_session = is_trading_day(
+                datetime.combine(cursor, time.min, tzinfo=SHANGHAI_TZ)
+            )
+            if not (
+                LOCAL_CALENDAR_COVERAGE_START <= cursor <= LOCAL_CALENDAR_COVERAGE_END
+                or isinstance(_trade_day_cache.get("days"), set)
+            ):
+                return None
+            if is_session:
+                sessions += 1
+        cursor += timedelta(days=1)
+    return sessions
 
 
 def is_market_hours() -> bool:

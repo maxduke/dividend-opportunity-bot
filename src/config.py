@@ -23,16 +23,16 @@ DB_FILE = os.getenv('DB_FILE', 'rules.db')
 
 # --- 监控参数配置 ---
 RSI_PERIOD = int(os.getenv('RSI_PERIOD', '6'))
-USE_ADJUST = os.getenv('USE_ADJUST', 'true').lower() == 'true'
-HIST_FETCH_DAYS = int(os.getenv('HIST_FETCH_DAYS', '200'))
+# Opportunity technical history is always forward-adjusted.  This is a
+# correctness invariant, not an end-user scoring switch.
+PRICE_ADJUSTMENT = 'qfq'
 TECHNICAL_HISTORY_DAYS = int(os.getenv('TECHNICAL_HISTORY_DAYS', '550'))
-MAX_NOTIFICATIONS_PER_TRIGGER = int(os.getenv('MAX_NOTIFICATIONS_PER_TRIGGER', '1'))
-ENABLE_OPPORTUNITY_MONITOR = os.getenv('ENABLE_OPPORTUNITY_MONITOR', 'true').lower() == 'true'
 ENABLE_INTRADAY_MONITOR = os.getenv('ENABLE_INTRADAY_MONITOR', 'false').lower() == 'true'
 VALUATION_CACHE_HOURS = float(os.getenv('VALUATION_CACHE_HOURS', '12'))
 BOND_CACHE_HOURS = float(os.getenv('BOND_CACHE_HOURS', '12'))
-VALUATION_STALE_MAX_DAYS = int(os.getenv('VALUATION_STALE_MAX_DAYS', '7'))
+VALUATION_STALE_MAX_TRADING_DAYS = int(os.getenv('VALUATION_STALE_MAX_TRADING_DAYS', '3'))
 VALUATION_PERCENTILE_MIN_OBS = int(os.getenv('VALUATION_PERCENTILE_MIN_OBS', '252'))
+VALUATION_PERCENTILE_MIN_SPAN_YEARS = float(os.getenv('VALUATION_PERCENTILE_MIN_SPAN_YEARS', '2.0'))
 VALUATION_PERCENTILE_LOOKBACK_YEARS = int(os.getenv('VALUATION_PERCENTILE_LOOKBACK_YEARS', '5'))
 CSI_DIVIDEND_YIELD_FIELD = os.getenv('CSI_DIVIDEND_YIELD_FIELD', '股息率2')
 OPPORTUNITY_ALERT_THRESHOLD = float(os.getenv('OPPORTUNITY_ALERT_THRESHOLD', '60'))
@@ -82,8 +82,6 @@ def validate_config():
         errors.append(f"CHECK_INTERVAL_SECONDS 必须 > 0，当前值: {CHECK_INTERVAL_SECONDS}")
     if RSI_PERIOD <= 0:
         errors.append(f"RSI_PERIOD 必须 > 0，当前值: {RSI_PERIOD}")
-    if HIST_FETCH_DAYS <= RSI_PERIOD:
-        errors.append(f"HIST_FETCH_DAYS({HIST_FETCH_DAYS}) 必须 > RSI_PERIOD({RSI_PERIOD})")
     if TECHNICAL_HISTORY_DAYS <= RSI_PERIOD:
         errors.append(
             f"TECHNICAL_HISTORY_DAYS({TECHNICAL_HISTORY_DAYS}) 必须 > RSI_PERIOD({RSI_PERIOD})"
@@ -92,10 +90,18 @@ def validate_config():
         errors.append(f"VALUATION_CACHE_HOURS 必须 > 0，当前值: {VALUATION_CACHE_HOURS}")
     if BOND_CACHE_HOURS <= 0:
         errors.append(f"BOND_CACHE_HOURS 必须 > 0，当前值: {BOND_CACHE_HOURS}")
-    if VALUATION_STALE_MAX_DAYS < 0:
-        errors.append(f"VALUATION_STALE_MAX_DAYS 必须 >= 0，当前值: {VALUATION_STALE_MAX_DAYS}")
+    if VALUATION_STALE_MAX_TRADING_DAYS < 0:
+        errors.append(
+            "VALUATION_STALE_MAX_TRADING_DAYS 必须 >= 0，"
+            f"当前值: {VALUATION_STALE_MAX_TRADING_DAYS}"
+        )
     if VALUATION_PERCENTILE_MIN_OBS < 1:
         errors.append(f"VALUATION_PERCENTILE_MIN_OBS 必须 >= 1，当前值: {VALUATION_PERCENTILE_MIN_OBS}")
+    if VALUATION_PERCENTILE_MIN_SPAN_YEARS <= 0:
+        errors.append(
+            "VALUATION_PERCENTILE_MIN_SPAN_YEARS 必须 > 0，"
+            f"当前值: {VALUATION_PERCENTILE_MIN_SPAN_YEARS}"
+        )
     if VALUATION_PERCENTILE_LOOKBACK_YEARS < 1:
         errors.append(
             f"VALUATION_PERCENTILE_LOOKBACK_YEARS 必须 >= 1，当前值: {VALUATION_PERCENTILE_LOOKBACK_YEARS}"
@@ -131,8 +137,6 @@ def validate_config():
             "HISTORY_FAILURE_COOLDOWN_MINUTES 必须 >= 0，"
             f"当前值: {HISTORY_FAILURE_COOLDOWN_MINUTES}"
         )
-    if MAX_NOTIFICATIONS_PER_TRIGGER < 1:
-        errors.append(f"MAX_NOTIFICATIONS_PER_TRIGGER 必须 >= 1，当前值: {MAX_NOTIFICATIONS_PER_TRIGGER}")
     if ENABLE_AKSHARE_PROXY_PATCH:
         if not AKSHARE_PROXY_AUTH_TOKEN:
             errors.append("ENABLE_AKSHARE_PROXY_PATCH=true 时必须设置 AKSHARE_PROXY_AUTH_TOKEN")
@@ -151,18 +155,17 @@ def log_config():
     """在启动时打印当前配置。"""
     logger.info("--- 机器人配置 ---")
     logger.info(f"RSI 周期: {RSI_PERIOD}")
-    logger.info(f"历史数据天数: {HIST_FETCH_DAYS}")
     logger.info(f"技术指标历史数据天数: {TECHNICAL_HISTORY_DAYS}")
-    logger.info(f"是否复权: {USE_ADJUST}")
-    logger.info(f"每日最大通知次数/规则: {MAX_NOTIFICATIONS_PER_TRIGGER}")
+    logger.info(f"价格复权: {PRICE_ADJUSTMENT}")
     logger.info(f"检查间隔: {CHECK_INTERVAL_SECONDS}秒")
     logger.info(f"数据库文件: {DB_FILE}")
-    logger.info(f"机会监控主开关: {'开启' if ENABLE_OPPORTUNITY_MONITOR else '关闭'}")
     logger.info(f"盘中高频监控: {'开启' if ENABLE_INTRADAY_MONITOR else '关闭'}")
     logger.info(f"估值缓存: {VALUATION_CACHE_HOURS}小时，国债缓存: {BOND_CACHE_HOURS}小时")
     logger.info(f"估值字段: {CSI_DIVIDEND_YIELD_FIELD}，机会告警阈值: {OPPORTUNITY_ALERT_THRESHOLD}")
     logger.info(
-        f"估值过期上限: {VALUATION_STALE_MAX_DAYS}天，分位样本: {VALUATION_PERCENTILE_MIN_OBS}，"
+        f"估值过期上限: {VALUATION_STALE_MAX_TRADING_DAYS}个交易日，"
+        f"分位样本: {VALUATION_PERCENTILE_MIN_OBS}，"
+        f"最短跨度: {VALUATION_PERCENTILE_MIN_SPAN_YEARS}年，"
         f"回看: {VALUATION_PERCENTILE_LOOKBACK_YEARS}年"
     )
     logger.info(
