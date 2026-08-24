@@ -3,9 +3,9 @@
 import logging
 import sqlite3
 import threading
-from typing import Optional, List
+from typing import Optional
 
-from .config import DB_FILE, ADMIN_USER_ID
+from .config import ADMIN_USER_ID, DB_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +169,7 @@ def db_execute(query, params=(), fetchone=False, fetchall=False, swallow_errors=
             return None
 
 
-def db_executemany(query, params_list, swallow_errors=True):
+def db_executemany(query, params_list):
     """Execute a batch under the same SQLite lock and transaction."""
     with _lock:
         try:
@@ -178,8 +178,6 @@ def db_executemany(query, params_list, swallow_errors=True):
             conn.commit()
         except sqlite3.Error as e:
             logger.error(f"数据库批量操作失败: {e} | query={query}")
-            if not swallow_errors:
-                raise
 
 
 # --- 白名单操作 ---
@@ -193,7 +191,3 @@ def add_to_whitelist(user_id: int):
 
 def remove_from_whitelist(user_id: int):
     db_execute("DELETE FROM whitelist WHERE user_id = ?", (user_id,))
-
-
-def get_whitelist() -> Optional[List]:
-    return db_execute("SELECT * FROM whitelist", fetchall=True)

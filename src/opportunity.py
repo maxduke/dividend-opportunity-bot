@@ -8,9 +8,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-import pytz
 
 from .config import (
     CSI_DIVIDEND_YIELD_FIELD,
@@ -23,13 +23,13 @@ from .config import (
     VALUATION_PERCENTILE_MIN_OBS,
     VALUATION_STALE_MAX_DAYS,
 )
-from .database import db_execute
 from .data_fetcher import (
     _fetch_single_realtime_price,
     calculate_rsi,
     get_history_data_cached,
     get_prices_for_rsi,
 )
+from .database import db_execute
 from .metrics import (
     calculate_52w_drawdown,
     calculate_52w_high,
@@ -46,6 +46,7 @@ from .metrics import (
     total_score,
     valid_close_count,
 )
+from .utils import split_message
 from .valuation_fetcher import (
     get_bond_history,
     get_cached_cn10y,
@@ -54,7 +55,7 @@ from .valuation_fetcher import (
 )
 
 logger = logging.getLogger(__name__)
-SHANGHAI_TZ = pytz.timezone("Asia/Shanghai")
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass
@@ -193,7 +194,6 @@ async def evaluate_opportunity(
     context,
     spot_price: Optional[float] = None,
     hist_df=None,
-    force_valuation: bool = False,
 ) -> OpportunitySnapshot:
     """Evaluate one rule; network data is supplied by shared caches where possible."""
     now = _now()
@@ -246,7 +246,7 @@ async def evaluate_opportunity(
     if hist_df is None or hist_df.empty:
         notes.append("Technical history unavailable")
 
-    valuation = await get_cached_valuation(benchmark_code, bot_data, force=force_valuation)
+    valuation = await get_cached_valuation(benchmark_code, bot_data)
     valuation_date = _date_or_none(valuation["valuation_date"]) if valuation else None
     valuation_field = "dividend_yield1" if CSI_DIVIDEND_YIELD_FIELD == "股息率1" else "dividend_yield2"
     valuation_available = valuation is not None and _float_or_none(valuation[valuation_field]) is not None
@@ -417,8 +417,8 @@ def latest_opportunity_snapshot(rule_id: int):
     )
 
 
-def snapshot_should_persist(rule_id: int, snapshot: OpportunitySnapshot, force: bool = False, alert_sent: bool = False) -> bool:
-    if force or alert_sent:
+def snapshot_should_persist(rule_id: int, snapshot: OpportunitySnapshot, alert_sent: bool = False) -> bool:
+    if alert_sent:
         return True
     previous = latest_opportunity_snapshot(rule_id)
     if previous is None:
@@ -593,20 +593,7 @@ def format_opportunity_chunks(
     max_len: int = 3800,
     alert_reason: Optional[str] = None,
 ) -> list[str]:
-    message = format_opportunity_detail(snapshot, alert_reason=alert_reason)
-    if len(message) <= max_len:
-        return [message]
-    # Detail is intentionally line-oriented; split only at line boundaries.
-    lines = message.splitlines()
-    chunks: list[str] = []
-    current = ""
-    for line in lines:
-        candidate = f"{current}\n{line}" if current else line
-        if len(candidate) > max_len and current:
-            chunks.append(current)
-            current = line
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
+    return split_message(
+        format_opportunity_detail(snapshot, alert_reason=alert_reason),
+        max_len=max_len,
+    )

@@ -6,24 +6,24 @@ import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import akshare as ak
 import pandas as pd
-import pytz
 
 from .config import (
     BOND_CACHE_HOURS,
     REQUEST_INTERVAL_SECONDS,
     VALUATION_CACHE_HOURS,
 )
-from .database import db_execute, db_executemany
 from .data_fetcher import _call_akshare, _run_with_retries
+from .database import db_execute, db_executemany
 
 logger = logging.getLogger(__name__)
 
-SHANGHAI_TZ = pytz.timezone("Asia/Shanghai")
-VALUATION_CACHE_KEY = "valuation_cache"
-BOND_CACHE_KEY = "bond_cache"
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+VALUATION_FAILURE_CACHE_KEY = "valuation_failure_cache"
+BOND_FAILURE_CACHE_KEY = "bond_failure_cache"
 VALUATION_CACHE_LOCK_KEY = "valuation_cache_lock"
 BOND_CACHE_LOCK_KEY = "bond_cache_lock"
 
@@ -166,10 +166,7 @@ def get_bond_history(start_date: Optional[date] = None, end_date: Optional[date]
 def _cache_is_fresh(entry: Optional[dict], hours: float) -> bool:
     if not entry:
         return False
-    try:
-        fetched_at = entry["fetched_at"]
-    except (KeyError, IndexError, TypeError):
-        fetched_at = entry.get("fetched_at")
+    fetched_at = entry["fetched_at"]
     if not fetched_at:
         return False
     if isinstance(fetched_at, str):
@@ -178,31 +175,29 @@ def _cache_is_fresh(entry: Optional[dict], hours: float) -> bool:
         except ValueError:
             return False
     if fetched_at.tzinfo is None:
-        fetched_at = SHANGHAI_TZ.localize(fetched_at)
+        fetched_at = fetched_at.replace(tzinfo=SHANGHAI_TZ)
     return (_now() - fetched_at).total_seconds() < hours * 3600
 
 
-async def get_cached_valuation(benchmark_code: str, bot_data: dict, force: bool = False):
+async def get_cached_valuation(benchmark_code: str, bot_data: dict):
     lock = bot_data.setdefault(VALUATION_CACHE_LOCK_KEY, asyncio.Lock())
     async with lock:
-        cache = bot_data.setdefault(VALUATION_CACHE_KEY, {})
         code = str(benchmark_code)
-        entry = cache.get(code)
-        if not force and _cache_is_fresh(entry, VALUATION_CACHE_HOURS):
-            return get_latest_valuation(code)
-
+        failures = bot_data.setdefault(VALUATION_FAILURE_CACHE_KEY, {})
         latest = get_latest_valuation(code)
-        if not force and _cache_is_fresh(latest, VALUATION_CACHE_HOURS):
-            cache[code] = {"fetched_at": latest["fetched_at"], "ok": True}
+        if _cache_is_fresh(latest, VALUATION_CACHE_HOURS):
             logger.info("[VALUATION] %s 命中持久化缓存，跳过网络请求", code)
+            return latest
+        if _cache_is_fresh({"fetched_at": failures.get(code)}, VALUATION_CACHE_HOURS):
             return latest
 
         frame = await fetch_csi_valuation(code)
-        cache[code] = {"fetched_at": _now(), "ok": frame is not None}
         if frame is not None:
+            failures.pop(code, None)
             count = persist_valuation_rows(code, frame)
             logger.info("[VALUATION] %s 保存 %s 条中证估值记录", code, count)
         else:
+            failures[code] = _now()
             logger.warning("[VALUATION] %s 刷新失败，使用本地已有估值（如有）", code)
         return get_latest_valuation(code)
 
@@ -322,36 +317,41 @@ def latest_bond_on_or_before(target_date: date, max_gap_days: int = 7):
     return row if (target_date - row_date).days <= max_gap_days else None
 
 
-async def get_cached_cn10y(bot_data: dict, force: bool = False):
+async def get_cached_cn10y(bot_data: dict):
     lock = bot_data.setdefault(BOND_CACHE_LOCK_KEY, asyncio.Lock())
     async with lock:
-        entry = bot_data.get(BOND_CACHE_KEY)
-        if not force and _cache_is_fresh(entry, BOND_CACHE_HOURS):
-            return latest_bond_on_or_before(_now().date(), max_gap_days=36500)
-
         latest_recent = latest_bond_on_or_before(_now().date(), max_gap_days=7)
-        if not force and _cache_is_fresh(latest_recent, BOND_CACHE_HOURS):
-            bot_data[BOND_CACHE_KEY] = {
-                "fetched_at": latest_recent["fetched_at"],
-                "source": latest_recent["source"],
-                "ok": True,
-            }
+        if _cache_is_fresh(latest_recent, BOND_CACHE_HOURS):
             logger.info("[BOND] 命中持久化缓存，跳过网络请求")
             return latest_recent
+        if _cache_is_fresh(
+            {"fetched_at": bot_data.get(BOND_FAILURE_CACHE_KEY)},
+            BOND_CACHE_HOURS,
+        ):
+            return latest_bond_on_or_before(_now().date(), max_gap_days=36500)
 
         frame, source = await fetch_cn10y()
-        bot_data[BOND_CACHE_KEY] = {"fetched_at": _now(), "source": source, "ok": frame is not None}
         if frame is not None:
+            bot_data.pop(BOND_FAILURE_CACHE_KEY, None)
             count = persist_bond_rows(frame, source)
             logger.info("[BOND] 保存 %s 条 %s 收益率记录", count, source)
         else:
+            bot_data[BOND_FAILURE_CACHE_KEY] = _now()
             logger.warning("[BOND] 刷新失败，使用本地已有国债收益率（如有）")
         return latest_bond_on_or_before(_now().date(), max_gap_days=36500)
 
 
-async def backfill_cn10y(years: int = 5) -> int:
+async def backfill_cn10y() -> int:
     end_date = _now().date()
-    start_date = end_date - timedelta(days=365 * years)
+    earliest = db_execute(
+        "SELECT MIN(valuation_date) AS valuation_date FROM benchmark_valuation_snapshots",
+        fetchone=True,
+    )
+    start_date = (
+        date.fromisoformat(earliest["valuation_date"]) - timedelta(days=7)
+        if earliest and earliest["valuation_date"]
+        else end_date - timedelta(days=30)
+    )
     total = 0
     cursor = start_date
     while cursor <= end_date:

@@ -14,10 +14,9 @@ from telegram.ext import ContextTypes
 
 from .config import (
     ADMIN_USER_ID,
-    ENABLE_DAILY_BRIEFING,
-    ENABLE_OPPORTUNITY_MONITOR,
     BRIEFING_TIMES_STR,
     CSI_DIVIDEND_YIELD_FIELD,
+    ENABLE_OPPORTUNITY_MONITOR,
     HIST_FETCH_DAYS,
     KEY_CACHE_DATE,
     KEY_HIST_CACHE,
@@ -27,7 +26,6 @@ from .config import (
     RSI_PERIOD,
     USE_ADJUST,
 )
-from .database import db_execute, is_whitelisted, add_to_whitelist, remove_from_whitelist
 from .data_fetcher import (
     _fetch_all_spot_data,
     _fetch_single_realtime_price,
@@ -35,6 +33,12 @@ from .data_fetcher import (
     get_asset_name_with_cache,
     get_history_data_cached,
     get_prices_for_rsi,
+)
+from .database import (
+    add_to_whitelist,
+    db_execute,
+    is_whitelisted,
+    remove_from_whitelist,
 )
 from .opportunity import (
     evaluate_opportunity,
@@ -124,7 +128,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - RSI 周期: <b>{RSI_PERIOD}</b>
 - 计算模式: ({'复权' if USE_ADJUST else '不复权'})
 - 请求间隔: <b>{REQUEST_INTERVAL_SECONDS}秒</b>
-- 每日简报主开关: <b>{'开启' if ENABLE_DAILY_BRIEFING else '关闭'} ({BRIEFING_TIMES_STR})</b>
+- 每日简报: <b>{BRIEFING_TIMES_STR}</b>
     """
     await update.message.reply_html(help_text)
 
@@ -440,10 +444,10 @@ async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     command = context.args[0].lower()
     if command == 'on':
         db_execute("UPDATE whitelist SET daily_briefing_enabled = 1 WHERE user_id = ?", (user_id,))
-        await update.message.reply_text("✅ 已为您开启每日收盘简报功能。")
+        await update.message.reply_text("✅ 已为您开启每日收盘前简报功能。")
     elif command == 'off':
         db_execute("UPDATE whitelist SET daily_briefing_enabled = 0 WHERE user_id = ?", (user_id,))
-        await update.message.reply_text("✅ 已为您关闭每日收盘简报功能。")
+        await update.message.reply_text("✅ 已为您关闭每日收盘前简报功能。")
     else:
         await update.message.reply_text("指令格式错误。请使用 /briefing on 或 /briefing off。")
 

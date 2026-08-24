@@ -2,13 +2,12 @@
 
 import asyncio
 import logging
-from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Union
+from zoneinfo import ZoneInfo
 
 import akshare as ak
 import pandas as pd
-import pytz
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
@@ -28,17 +27,16 @@ from .config import (
     KEY_HIST_CACHE,
     KEY_HIST_FAILURE_CACHE,
     KEY_NAME_CACHE,
-    NAME_CACHE_MAX_SIZE,
     REQUEST_INTERVAL_SECONDS,
     RSI_PERIOD,
     STOCK_PREFIXES,
     TECHNICAL_HISTORY_DAYS,
     USE_ADJUST,
 )
-from .market import is_em_blocked
 from .utils import get_sina_symbol, normalize_hist_df
 
 logger = logging.getLogger(__name__)
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 # --- 重试逻辑（改进5: 指数退避） ---
@@ -110,16 +108,14 @@ def history_failure_is_fresh(context: ContextTypes.DEFAULT_TYPE, asset_code: str
     failed_at = context.bot_data.get(KEY_HIST_FAILURE_CACHE, {}).get(str(asset_code))
     if not failed_at:
         return False
-    try:
-        failed_at = datetime.fromisoformat(str(failed_at))
-        if failed_at.tzinfo is None:
-            failed_at = pytz.timezone("Asia/Shanghai").localize(failed_at)
-        current = now or datetime.now(pytz.timezone("Asia/Shanghai"))
-        if current.tzinfo is None:
-            current = pytz.timezone("Asia/Shanghai").localize(current)
-        return (current - failed_at).total_seconds() < HISTORY_FAILURE_COOLDOWN_MINUTES * 60
-    except (TypeError, ValueError):
+    if not isinstance(failed_at, datetime):
         return False
+    current = now or datetime.now(SHANGHAI_TZ)
+    if failed_at.tzinfo is None:
+        failed_at = failed_at.replace(tzinfo=SHANGHAI_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=SHANGHAI_TZ)
+    return (current - failed_at).total_seconds() < HISTORY_FAILURE_COOLDOWN_MINUTES * 60
 
 
 # --- 缓存 ---
@@ -135,20 +131,12 @@ def ensure_daily_history_cache(context: ContextTypes.DEFAULT_TYPE, now: datetime
     return bot_data.get(KEY_HIST_CACHE, {})
 
 
-# --- 资产名称缓存（改进7: LRU 上限） ---
+# --- 资产名称缓存 ---
 
 async def get_asset_name_with_cache(asset_code: str, context: ContextTypes.DEFAULT_TYPE) -> str:
-    name_cache: OrderedDict = context.bot_data.get(KEY_NAME_CACHE, OrderedDict())
-    # 确保 bot_data 中存的是 OrderedDict
-    if not isinstance(name_cache, OrderedDict):
-        name_cache = OrderedDict(name_cache)
-        context.bot_data[KEY_NAME_CACHE] = name_cache
-    elif KEY_NAME_CACHE not in context.bot_data:
-        context.bot_data[KEY_NAME_CACHE] = name_cache
+    name_cache = context.bot_data.setdefault(KEY_NAME_CACHE, {})
 
     if asset_code in name_cache:
-        # 移到末尾（最近使用）
-        name_cache.move_to_end(asset_code)
         logger.debug(f"从缓存命中资产名称: {asset_code} -> {name_cache[asset_code]}")
         return name_cache[asset_code]
 
@@ -189,10 +177,6 @@ async def get_asset_name_with_cache(asset_code: str, context: ContextTypes.DEFAU
     )
     if not name:
         name = f"Asset_{asset_code}"
-
-    # 淘汰最旧条目
-    while len(name_cache) >= NAME_CACHE_MAX_SIZE:
-        name_cache.popitem(last=False)
 
     name_cache[asset_code] = name
     logger.debug(f"已将新资产名称存入缓存: {asset_code} -> {name}")
@@ -261,7 +245,6 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
                 logger.warning(f"新浪接口获取历史数据失败({asset_code}): {e}")
             return None
 
-        use_em = not await is_em_blocked()
         df = None
         source = "sina"
         proxy_can_use_free_history = not (
@@ -284,7 +267,7 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
                 ):
                     df = em_df
                     source = "em"
-        elif use_em:
+        else:
             df = await _run_with_retries(fetch_hist_em, f"获取历史数据({asset_code})")
             source = "em"
         # Bug3: 统一使用 is None or empty 判断
@@ -326,7 +309,7 @@ async def get_history_data_cached(
     now: datetime = None,
 ) -> Union[pd.DataFrame, None]:
     """Share one daily history attempt across jobs and commands."""
-    current = now or datetime.now(pytz.timezone("Asia/Shanghai"))
+    current = now or datetime.now(SHANGHAI_TZ)
     cache = ensure_daily_history_cache(context, current)
     cached = cache.get(asset_code)
     if _cached_history_is_usable(cached, days):
@@ -337,7 +320,7 @@ async def get_history_data_cached(
     fetched = await get_history_data(asset_code, days)
     failures = context.bot_data.setdefault(KEY_HIST_FAILURE_CACHE, {})
     if fetched is None or fetched.empty:
-        failures[asset_code] = current.isoformat()
+        failures[asset_code] = current
         return cached
 
     cache[asset_code] = fetched
@@ -346,7 +329,7 @@ async def get_history_data_cached(
     else:
         # Keep the usable partial history for RSI, but do not pay again every
         # monitoring tick while MA200/52W data is still unavailable.
-        failures[asset_code] = current.isoformat()
+        failures[asset_code] = current
     return fetched
 
 
@@ -357,7 +340,7 @@ async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
     """
     try:
         base_date = hist_df.index[-1]
-        today_date = datetime.now(pytz.timezone('Asia/Shanghai')).date()
+        today_date = datetime.now(SHANGHAI_TZ).date()
         if base_date.date() >= today_date and len(hist_df.index) > 1:
             base_date = hist_df.index[-2]
         raw_start = (base_date - timedelta(days=30)).strftime('%Y%m%d')
@@ -416,7 +399,6 @@ async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
                 logger.warning(f"新浪接口获取未复权数据失败({asset_code}): {e}")
             return None
 
-        use_em = not await is_em_blocked()
         raw_df = None
         sina_attempted = False
 
@@ -425,7 +407,7 @@ async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
             sina_attempted = True
             raw_df = await _run_with_retries(fetch_raw_hist_sina, f"获取未复权数据-新浪({asset_code})")
 
-        if (raw_df is None or raw_df.empty) and use_em:
+        if raw_df is None or raw_df.empty:
             raw_df = await _run_with_retries(
                 fetch_raw_hist_em,
                 f"获取未复权数据({asset_code})",
@@ -537,7 +519,7 @@ def get_prices_for_rsi(hist_df: pd.DataFrame, spot_price: float) -> Union[pd.Ser
         return None
     close_prices = hist_df['收盘'].copy()
     last_date_in_hist = close_prices.index[-1].date()
-    today_date = datetime.now(pytz.timezone('Asia/Shanghai')).date()
+    today_date = datetime.now(SHANGHAI_TZ).date()
     adjusted_spot_price = _adjust_spot_price(hist_df, spot_price)
     if last_date_in_hist < today_date:
         close_prices.loc[pd.Timestamp(today_date)] = adjusted_spot_price

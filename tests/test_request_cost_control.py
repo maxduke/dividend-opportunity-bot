@@ -24,7 +24,6 @@ def test_proxy_history_prefers_sina_and_skips_eastmoney(monkeypatch):
     monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
     monkeypatch.setattr(data_fetcher, "USE_ADJUST", True)
     monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
-    monkeypatch.setattr(data_fetcher, "is_em_blocked", AsyncMock(return_value=False))
 
     result = asyncio.run(data_fetcher.get_history_data("000001", 550))
 
@@ -51,7 +50,6 @@ def test_adjusted_etf_history_uses_one_eastmoney_call(monkeypatch):
     monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
     monkeypatch.setattr(data_fetcher, "USE_ADJUST", True)
     monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
-    monkeypatch.setattr(data_fetcher, "is_em_blocked", AsyncMock(return_value=False))
 
     result = asyncio.run(data_fetcher.get_history_data("510300", 550))
 
@@ -79,7 +77,6 @@ def test_adjusted_etf_sina_fallback_is_marked_unadjusted(monkeypatch):
     monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
     monkeypatch.setattr(data_fetcher, "USE_ADJUST", True)
     monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
-    monkeypatch.setattr(data_fetcher, "is_em_blocked", AsyncMock(return_value=False))
 
     result = asyncio.run(data_fetcher.get_history_data("510300", 550))
 
@@ -144,6 +141,19 @@ def test_fresh_persisted_valuation_skips_network(monkeypatch):
 
     assert result == latest
     fetch.assert_not_awaited()
+
+
+def test_failed_valuation_refresh_is_not_repeated_within_ttl(monkeypatch):
+    from src import valuation_fetcher
+
+    fetch = AsyncMock(return_value=None)
+    monkeypatch.setattr(valuation_fetcher, "get_latest_valuation", lambda code: None)
+    monkeypatch.setattr(valuation_fetcher, "fetch_csi_valuation", fetch)
+    bot_data = {}
+
+    assert asyncio.run(valuation_fetcher.get_cached_valuation("000922", bot_data)) is None
+    assert asyncio.run(valuation_fetcher.get_cached_valuation("000922", bot_data)) is None
+    fetch.assert_awaited_once()
 
 
 def test_fresh_persisted_bond_skips_network(monkeypatch):

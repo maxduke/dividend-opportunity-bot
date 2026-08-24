@@ -72,11 +72,9 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 
 | 环境变量                   | 描述                                                         | 默认值     |
 | -------------------------- | ------------------------------------------------------------ | ---------- |
-| `RANDOM_DELAY_MAX_SECONDS` | 在每次检查周期开始时，增加一个0到该秒数之间的随机延迟。     | `0`        |
 | `REQUEST_INTERVAL_SECONDS` | 每个API请求之间的固定间隔时间（秒），用于防止接口限制。     | `1.0`      |
 | `FETCH_FAILURE_THRESHOLD`  | 连续获取数据失败多少次后，向管理员发送一条警报通知。         | `5`        |
-| `ENABLE_DAILY_BRIEFING`    | **每日简报的主开关**。设为 `true` 以允许用户使用此功能。     | `true`    |
-| `DAILY_BRIEFING_TIMES`      | 每日简报的发送时间 (上海时间, 24小时制)。支持多个，用逗号分隔。     | `14:50`    |
+| `DAILY_BRIEFING_TIMES`      | 每日简报的发送时间 (上海时间, 24小时制)。支持多个，用逗号分隔；留空可全局关闭。 | `14:50` |
 | `FETCH_RETRY_ATTEMPTS` | 获取数据失败后的重试次数。     | `3`      |
 | `FETCH_RETRY_DELAY_SECONDS`  | 每次重试之间的等待时间（秒）。         | `5`        |
 | `AKSHARE_CALL_TIMEOUT_SECONDS` | 单次 AKShare 阻塞调用的异步等待上限；超时后进入已有 retry/fallback。 | `15` |
@@ -107,9 +105,7 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 - proxy 模式下，股票和不复权历史先尝试新浪；前复权 ETF 每日只请求一次 EastMoney。历史失败、估值和国债快照均有缓存，监控循环不会每 60 秒重复调用。
 - `fund_name_em()` 使用 `.js` 资源，而补丁会明确绕过 `.js`/`.html`；proxy 模式不调用它，ETF 名称回退为代码，避免产生未代理请求。
 
-补丁会在主程序导入 AKShare 前安装，并且只在环境变量明确开启且余额检查成功时生效；补丁包不可用或凭据缺失会让启动失败。余额检查失败时不会安装 patch，并记录不包含 token 的 warning。它是第三方付费代理服务，不是 AKShare 官方组件。
-
-服务商当前的余额与授权接口使用 HTTP `47001`，token 会出现在请求 URL 中。只应在可信网络中启用，并避免在日志、命令行和仓库中暴露长期 token。
+补丁会在主程序导入 AKShare 前安装；补丁包不可用或凭据缺失会让启动失败。它是第三方付费代理服务，不是 AKShare 官方组件。请避免在日志、命令行和仓库中暴露长期 token。
 
 ## 🚀 部署与运行
 
@@ -135,6 +131,6 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 
 资产与 benchmark 的对应关系由用户在 `/addop` 中指定，Bot 只验证两端数据可用，不验证基金实际跟踪关系。错误配对会让估值分数失去意义，请以基金合同或管理人资料为准。
 
-首次部署可运行 `python scripts/verify_data_sources.py` 验证实时数据源；启用 proxy 后可用 `python scripts/verify_data_sources.py --proxy-only --timeout 300` 逐个验证可 hook 的 EastMoney 接口。proxy smoke 会阻断补丁自带的目标域名直连 fallback，确保显示 `route=PATCH` 时请求确实由代理返回。余额不可确认时不安装 patch，也不继续产生目标接口请求。普通 CI 不访问真实 AKShare，只有设置 `RUN_LIVE_AKSHARE_TESTS=1` 才执行 live smoke test。
+首次部署可运行 `python scripts/verify_data_sources.py` 验证实时数据源；启用 proxy 后可用 `python scripts/verify_data_sources.py --proxy-only --timeout 300` 逐个验证可 hook 的 EastMoney 接口。proxy smoke 会阻断补丁自带的目标域名直连 fallback，确保显示 `route=PATCH` 时请求确实由代理返回。普通 CI 不访问真实 AKShare，只有设置 `RUN_LIVE_AKSHARE_TESTS=1` 才执行 live smoke test。
 
 Opportunity Score 是量化监控信号，不是投资建议，也不预测市场底部。

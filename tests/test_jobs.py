@@ -39,3 +39,15 @@ def test_intraday_job_stops_before_market_or_data_access_when_disabled(monkeypat
     )
 
     asyncio.run(jobs._check_rules_job(SimpleNamespace(bot_data={})))
+
+
+def test_daily_briefing_stops_before_provider_access_without_subscribers(monkeypatch):
+    from src import jobs
+
+    monkeypatch.setattr(jobs, "is_trading_day", lambda now: True)
+    monkeypatch.setattr(jobs, "db_execute", lambda *args, **kwargs: [])
+    provider = AsyncMock(side_effect=AssertionError("provider should not run"))
+    monkeypatch.setattr(jobs, "_fetch_all_spot_data", provider)
+
+    asyncio.run(jobs.daily_briefing_job(SimpleNamespace(bot_data={})))
+    provider.assert_not_awaited()

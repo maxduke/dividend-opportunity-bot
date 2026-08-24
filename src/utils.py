@@ -31,3 +31,19 @@ def get_sina_symbol(code: str) -> str:
     elif code.startswith(('4', '8')):
         return f"bj{code}"
     return code
+
+
+def split_message(text: str, max_len: int = 3800) -> list[str]:
+    """Split a Telegram message at line boundaries."""
+    chunks = []
+    current = ""
+    for line in text.splitlines():
+        candidate = f"{current}\n{line}" if current else line
+        if current and len(candidate) > max_len:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [""]
