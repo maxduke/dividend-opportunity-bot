@@ -263,6 +263,10 @@ async def evaluate_opportunity(
         and not hist_df.empty
         and hist_df.attrs.get("price_basis") == "qfq"
         and not closes.empty
+        and (
+            supplied_history
+            or runtime_history_is_usable(hist_df, TECHNICAL_HISTORY_DAYS, now)
+        )
     )
     ma200 = calculate_ma200(closes) if technical_basis_available and historical_closes >= 200 else None
     ma_deviation = calculate_ma200_deviation(current_price, ma200)

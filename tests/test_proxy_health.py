@@ -194,6 +194,43 @@ def test_runtime_outage_warns_once_and_recovery_warns_once():
     assert len(bot.send_message.calls) == 2
 
 
+def test_runtime_unverified_warns_once():
+    from src import proxy_health
+
+    now = datetime(2026, 8, 24, 12, tzinfo=SHANGHAI)
+    bot = SimpleNamespace(send_message=_AsyncRecorder())
+    proxy_health.set_proxy_patch_active(True)
+    proxy_health.last_notified_proxy_health_state = proxy_health.POSITIVE
+    proxy_health._cached_status = proxy_health.ProxyBalanceStatus(
+        proxy_health.UNVERIFIED, None, now, "request_error"
+    )
+
+    assert asyncio.run(proxy_health.notify_proxy_health(bot))
+    assert not asyncio.run(proxy_health.notify_proxy_health(bot))
+    assert len(bot.send_message.calls) == 1
+    assert "运行时余额检查失败" in bot.send_message.calls[0]["text"]
+
+
+def test_failed_notification_is_retried(caplog):
+    from src import proxy_health
+
+    now = datetime(2026, 8, 24, 12, tzinfo=SHANGHAI)
+    recorder = _FailOnceRecorder()
+    bot = SimpleNamespace(send_message=recorder)
+    proxy_health.set_proxy_patch_active(True)
+    proxy_health.last_notified_proxy_health_state = proxy_health.POSITIVE
+    proxy_health._cached_status = proxy_health.ProxyBalanceStatus(
+        proxy_health.NO_BALANCE_OR_INVALID, 0.0, now
+    )
+
+    assert not asyncio.run(proxy_health.notify_proxy_health(bot))
+    assert proxy_health.last_notified_proxy_health_state == proxy_health.POSITIVE
+    assert asyncio.run(proxy_health.notify_proxy_health(bot))
+    assert not asyncio.run(proxy_health.notify_proxy_health(bot))
+    assert len(recorder.calls) == 2
+    assert "secret-token" not in caplog.text
+
+
 def test_low_balance_stays_usable_and_warns_once(monkeypatch):
     from src import proxy_health
 
@@ -232,3 +269,10 @@ class _AsyncRecorder:
 
     async def __call__(self, **kwargs):
         self.calls.append(kwargs)
+
+
+class _FailOnceRecorder(_AsyncRecorder):
+    async def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            raise RuntimeError("temporary Telegram failure for secret-token")

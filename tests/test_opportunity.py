@@ -250,6 +250,37 @@ def test_recovered_qfq_history_restores_all_technical_factors(monkeypatch):
     history_fetch.assert_not_awaited()
 
 
+def test_production_refresh_cannot_score_stale_qfq_history(monkeypatch):
+    history = pd.DataFrame(
+        {"收盘": [100.0 + i * 0.01 for i in range(550)]},
+        index=pd.date_range("2025-01-01", periods=550),
+    )
+    history.attrs.update(
+        technical_history_days=550,
+        price_basis="qfq",
+        price_basis_asof="2026-08-23",
+    )
+    monkeypatch.setattr(
+        "src.opportunity._now",
+        lambda: datetime(2026, 8, 24, 10, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    monkeypatch.setattr(
+        "src.opportunity.get_history_data_cached", AsyncMock(return_value=history)
+    )
+    monkeypatch.setattr(
+        "src.opportunity.get_cached_valuation", AsyncMock(return_value=None)
+    )
+
+    snapshot = asyncio.run(
+        evaluate_opportunity(_rule(), SimpleNamespace(bot_data={}), spot_price=105.5)
+    )
+
+    assert snapshot.technical_price_basis == "unavailable"
+    assert snapshot.ma200 is None
+    assert snapshot.high_52w is None
+    assert snapshot.rsi6 is None
+
+
 def test_future_valuation_date_is_stale_and_cannot_raise_level(monkeypatch):
     history = pd.DataFrame(
         {"收盘": [100.0] * 300},

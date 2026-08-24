@@ -50,6 +50,7 @@ _lock = threading.RLock()
 _cached_status: ProxyBalanceStatus | None = None
 _cache_identity: tuple[bool, str, str, float] | None = None
 _patch_active = False
+_notification_lock = asyncio.Lock()
 
 # Public so tests and the command layer can inspect/reset the dedupe baseline.
 last_notified_proxy_health_state: str | None = None
@@ -243,6 +244,12 @@ ETF qfq history 暂停请求，技术评分可能不可用。
 Bot 会定期重新检查余额。
 充值后无需重建规则。"""
 
+RUNTIME_UNVERIFIED_MESSAGE = """⚠️ AKShare Proxy 状态无法验证
+
+运行时余额检查失败，ETF qfq history 暂停请求，技术评分可能不可用。
+
+Bot 会定期重新检查服务状态。"""
+
 RECOVERY_MESSAGE = """✅ AKShare Proxy 已恢复
 
 检测到积分恢复，ETF qfq history 将重新启用。
@@ -261,17 +268,19 @@ def _low_balance_message(status: ProxyBalanceStatus) -> str:
 async def notify_proxy_health(bot, startup: bool = False) -> bool:
     """Notify the administrator once per meaningful health transition."""
 
-    status = get_cached_proxy_balance_status()
-    if status is None:
-        status = await check_proxy_balance_async()
-    category = proxy_health_category(status)
-    if category is None:
-        return False
+    async with _notification_lock:
+        status = get_cached_proxy_balance_status()
+        if status is None:
+            status = await check_proxy_balance_async()
+        category = proxy_health_category(status)
+        if category is None:
+            return False
 
-    global last_notified_proxy_health_state
-    with _lock:
-        previous = last_notified_proxy_health_state
+        global last_notified_proxy_health_state
+        with _lock:
+            previous = last_notified_proxy_health_state
         message = None
+        active = proxy_patch_active()
         if startup:
             if category == NO_BALANCE_OR_INVALID and previous != category:
                 message = STARTUP_NO_BALANCE_MESSAGE
@@ -279,26 +288,32 @@ async def notify_proxy_health(bot, startup: bool = False) -> bool:
                 message = STARTUP_UNVERIFIED_MESSAGE
             elif category == LOW_BALANCE and previous != category:
                 message = _low_balance_message(status)
-        elif category == NO_BALANCE_OR_INVALID:
-            if previous != category and proxy_patch_active():
-                message = RUNTIME_NO_BALANCE_MESSAGE
+        elif category == NO_BALANCE_OR_INVALID and previous != category:
+            message = RUNTIME_NO_BALANCE_MESSAGE if active else STARTUP_NO_BALANCE_MESSAGE
+        elif category == UNVERIFIED and previous != category:
+            message = RUNTIME_UNVERIFIED_MESSAGE if active else STARTUP_UNVERIFIED_MESSAGE
         elif category == POSITIVE:
-            if previous in {NO_BALANCE_OR_INVALID, UNVERIFIED} and proxy_patch_active():
+            if previous in {NO_BALANCE_OR_INVALID, UNVERIFIED} and active:
                 message = RECOVERY_MESSAGE
         elif category == LOW_BALANCE:
-            if previous in {NO_BALANCE_OR_INVALID, UNVERIFIED} and proxy_patch_active():
+            if previous in {NO_BALANCE_OR_INVALID, UNVERIFIED} and active:
                 message = RECOVERY_MESSAGE
             elif previous != category:
                 message = _low_balance_message(status)
-        last_notified_proxy_health_state = category
 
-    if not message or not ADMIN_USER_ID:
-        return False
-    try:
-        await bot.send_message(chat_id=ADMIN_USER_ID, text=message)
-    except Exception as exc:  # noqa: BLE001 - Telegram implementation varies
-        logger.warning(
-            "AKShare proxy notification failed error_type=%s", type(exc).__name__
-        )
-        return False
-    return True
+        if not message:
+            with _lock:
+                last_notified_proxy_health_state = category
+            return False
+        if not ADMIN_USER_ID:
+            return False
+        try:
+            await bot.send_message(chat_id=ADMIN_USER_ID, text=message)
+        except Exception as exc:  # noqa: BLE001 - Telegram implementation varies
+            logger.warning(
+                "AKShare proxy notification failed error_type=%s", type(exc).__name__
+            )
+            return False
+        with _lock:
+            last_notified_proxy_health_state = category
+        return True
