@@ -100,7 +100,7 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 - `ENABLE_AKSHARE_PROXY_PATCH=false`：默认关闭。
 - 开启时必须设置 `AKSHARE_PROXY_AUTH_TOKEN`；`AKSHARE_PROXY_AUTH_IP` 默认是服务商文档中的 `101.201.173.125`，这里只填写 IP，不要填写端口。token 只放在部署环境，不要提交到仓库。
 - `AKSHARE_PROXY_HOOK_DOMAINS` 只列出需要代理的东方财富域名；新浪、中证、ChinaBond 请求不经过这个补丁。
-- 参考 `fund-alert-bot`，默认 `AKSHARE_PROXY_RETRY=1` 且强制 `fast=False`：patch 独占 EastMoney 重试预算，避免应用层重试和并发分页放大计费请求。
+- 参考 `fund-alert-bot`，默认 `AKSHARE_PROXY_RETRY=1`、最大允许 `3`，并强制 `fast=False`：patch 独占 EastMoney 重试预算，避免应用层重试和并发分页放大计费请求。服务商示例中的 `retry=30` 不适合长期监控，因为单次失败可能产生大量付费尝试。
 - proxy 模式下，股票和不复权历史先尝试新浪；前复权 ETF 每日只请求一次 EastMoney。历史失败、估值和国债快照均有缓存，监控循环不会每 60 秒重复调用。
 - `fund_name_em()` 使用 `.js` 资源，而补丁会明确绕过 `.js`/`.html`；proxy 模式不调用它，ETF 名称回退为代码，避免产生未代理请求。
 
@@ -132,6 +132,6 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 
 资产与 benchmark 的对应关系由用户在 `/addop` 中指定，Bot 只验证两端数据可用，不验证基金实际跟踪关系。错误配对会让估值分数失去意义，请以基金合同或管理人资料为准。
 
-首次部署可运行 `python scripts/verify_data_sources.py` 验证实时数据源；启用 proxy 后可用 `python scripts/verify_data_sources.py --proxy-only --timeout 300` 逐个验证可 hook 的 EastMoney 接口。余额不可确认时不安装 patch，也不继续产生目标接口请求。普通 CI 不访问真实 AKShare，只有设置 `RUN_LIVE_AKSHARE_TESTS=1` 才执行 live smoke test。
+首次部署可运行 `python scripts/verify_data_sources.py` 验证实时数据源；启用 proxy 后可用 `python scripts/verify_data_sources.py --proxy-only --timeout 300` 逐个验证可 hook 的 EastMoney 接口。proxy smoke 会阻断补丁自带的目标域名直连 fallback，确保显示 `route=PATCH` 时请求确实由代理返回。余额不可确认时不安装 patch，也不继续产生目标接口请求。普通 CI 不访问真实 AKShare，只有设置 `RUN_LIVE_AKSHARE_TESTS=1` 才执行 live smoke test。
 
 Opportunity Score 是量化监控信号，不是投资建议，也不预测市场底部。

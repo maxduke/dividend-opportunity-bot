@@ -56,6 +56,7 @@ ENABLE_AKSHARE_PROXY_PATCH = os.getenv('ENABLE_AKSHARE_PROXY_PATCH', 'false').lo
 AKSHARE_PROXY_AUTH_IP = os.getenv('AKSHARE_PROXY_AUTH_IP', '101.201.173.125').strip()
 AKSHARE_PROXY_AUTH_TOKEN = os.getenv('AKSHARE_PROXY_AUTH_TOKEN', '').strip()
 AKSHARE_PROXY_RETRY = int(os.getenv('AKSHARE_PROXY_RETRY', '1'))
+AKSHARE_PROXY_MAX_RETRY = 3
 AKSHARE_PROXY_HOOK_DOMAINS = os.getenv(
     'AKSHARE_PROXY_HOOK_DOMAINS',
     'push2.eastmoney.com,push2his.eastmoney.com',
@@ -140,8 +141,11 @@ def validate_config():
     if ENABLE_AKSHARE_PROXY_PATCH:
         if not AKSHARE_PROXY_AUTH_TOKEN:
             errors.append("ENABLE_AKSHARE_PROXY_PATCH=true 时必须设置 AKSHARE_PROXY_AUTH_TOKEN")
-        if AKSHARE_PROXY_RETRY < 1:
-            errors.append(f"AKSHARE_PROXY_RETRY 必须 >= 1，当前值: {AKSHARE_PROXY_RETRY}")
+        if not 1 <= AKSHARE_PROXY_RETRY <= AKSHARE_PROXY_MAX_RETRY:
+            errors.append(
+                f"AKSHARE_PROXY_RETRY 必须在 1 到 {AKSHARE_PROXY_MAX_RETRY} 之间，"
+                f"当前值: {AKSHARE_PROXY_RETRY}"
+            )
         if not any(domain.strip() for domain in AKSHARE_PROXY_HOOK_DOMAINS.split(',')):
             errors.append("AKSHARE_PROXY_HOOK_DOMAINS 至少需要一个域名")
 

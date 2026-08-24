@@ -36,6 +36,25 @@ def _isolated_worker(queue, operation: str, args: tuple):
 
         if operation.startswith("proxy_"):
             import akshare_proxy_patch
+            import requests
+
+            from src.config import AKSHARE_PROXY_HOOK_DOMAINS
+
+            # The third-party patch falls back to a direct request after its
+            # retries. Block that path so PASS proves the proxy served the call.
+            original_direct_request = requests._OriginalSession.request
+            hook_domains = tuple(
+                domain.strip()
+                for domain in AKSHARE_PROXY_HOOK_DOMAINS.split(",")
+                if domain.strip()
+            )
+
+            def reject_target_direct_fallback(session, method, url, **kwargs):
+                if any(domain in (url or "") for domain in hook_domains):
+                    raise RuntimeError("target request attempted direct fallback")
+                return original_direct_request(session, method, url, **kwargs)
+
+            requests._OriginalSession.request = reject_target_direct_fallback
 
             proxy_cache_before = akshare_proxy_patch._cache.data
 
