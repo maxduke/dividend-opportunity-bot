@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytz
-import pytest
 
 from src.data_fetcher import get_prices_for_rsi, _adjust_spot_price
 

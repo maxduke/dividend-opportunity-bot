@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 
+import asyncio
+import html
 import logging
 import sqlite3
 from collections import defaultdict
+from datetime import datetime
 from functools import wraps
 
 from telegram import Update
@@ -12,11 +15,14 @@ from telegram.ext import ContextTypes
 from .config import (
     ADMIN_USER_ID,
     ENABLE_DAILY_BRIEFING,
+    ENABLE_OPPORTUNITY_MONITOR,
     BRIEFING_TIMES_STR,
+    CSI_DIVIDEND_YIELD_FIELD,
     HIST_FETCH_DAYS,
     KEY_CACHE_DATE,
     KEY_HIST_CACHE,
     MAX_NOTIFICATIONS_PER_TRIGGER,
+    OPPORTUNITY_ALERT_THRESHOLD,
     REQUEST_INTERVAL_SECONDS,
     RSI_PERIOD,
     USE_ADJUST,
@@ -26,13 +32,21 @@ from .data_fetcher import (
     _fetch_all_spot_data,
     _fetch_single_realtime_price,
     calculate_rsi,
-    ensure_daily_history_cache,
     get_asset_name_with_cache,
-    get_history_data,
+    get_history_data_cached,
     get_prices_for_rsi,
 )
-
-import asyncio
+from .opportunity import (
+    evaluate_opportunity,
+    format_opportunity_chunks,
+    record_rule_evaluation,
+    save_opportunity_snapshot,
+)
+from .valuation_fetcher import (
+    backfill_cn10y,
+    get_cached_valuation,
+    has_bond_history,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +81,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config_info = f"复权: {'是' if USE_ADJUST else '否'}"
     await update.message.reply_html(
         f"你好, {user.mention_html()}!\n\n"
-        f"这是一个A股/ETF的RSI({RSI_PERIOD})监控机器人。\n"
+        f"这是一个A股/ETF技术指标与红利机会监控机器人。\n"
         f"({config_info})\n"
         f"使用 /help 查看所有可用命令。"
     )
@@ -94,6 +108,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /check - 立即查询当前RSI值
 /briefing <code>on|off</code> - 开/关您的每日简报 (您当前: <b>{briefing_status}</b>)
 
+<b>红利机会监控</b>
+/addop <code>ASSET BENCHMARK [MIN_SCORE]</code> - 添加机会监控
+/delop <code>ID</code> - 删除机会监控
+/oplist - 查看机会监控
+/opon <code>ID</code> / /opoff <code>ID</code> - 开关机会监控
+/opcheck [ID] - 查询机会分数明细
+
 <b>白名单管理 (仅限管理员)</b>
 /add_w <code>ID</code> - 添加用户
 /del_w <code>ID</code> - 移除用户
@@ -106,6 +127,245 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - 每日简报主开关: <b>{'开启' if ENABLE_DAILY_BRIEFING else '关闭'} ({BRIEFING_TIMES_STR})</b>
     """
     await update.message.reply_html(help_text)
+
+
+@whitelisted_only
+async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ENABLE_OPPORTUNITY_MONITOR:
+        await update.message.reply_text("Opportunity Monitor 当前未启用。")
+        return
+    sent_message = None
+    created_rule_id = None
+    creation_complete = False
+    try:
+        if len(context.args) not in (2, 3):
+            await update.message.reply_text("命令格式错误。\n正确格式: /addop <asset_code> <benchmark_code> [min_score]")
+            return
+        asset_code, benchmark_code = context.args[:2]
+        benchmark_code = benchmark_code.upper()
+        min_score = float(context.args[2]) if len(context.args) == 3 else OPPORTUNITY_ALERT_THRESHOLD
+        if not 0 <= min_score <= 100:
+            await update.message.reply_text("min_score 必须在 0 到 100 之间。")
+            return
+        if not (
+            asset_code.isdigit()
+            and benchmark_code.isdigit()
+            and len(asset_code) == 6
+            and len(benchmark_code) == 6
+        ):
+            await update.message.reply_text("asset_code 和 benchmark_code 必须是 6 位数字代码。")
+            return
+        if db_execute(
+            """
+            SELECT id FROM opportunity_rules
+            WHERE user_id = ? AND asset_code = ? AND benchmark_code = ?
+            """,
+            (update.effective_user.id, asset_code, benchmark_code),
+            fetchone=True,
+        ):
+            await update.message.reply_text("❌ 相同的资产—benchmark Opportunity Rule 已存在。")
+            return
+
+        sent_message = await update.message.reply_text(f"正在验证资产 {asset_code} 与估值基准 {benchmark_code}，请稍候...")
+        price = await _fetch_single_realtime_price(asset_code)
+        if price is None:
+            await sent_message.edit_text(f"❌ 无法获取资产 {asset_code} 的实时价格，请确认代码正确。")
+            return
+
+        valuation = await get_cached_valuation(benchmark_code, context.bot_data)
+        if valuation is None:
+            await sent_message.edit_text(
+                "❌ 该 benchmark 当前无法通过中证估值接口获取股息率，\n"
+                "因此无法创建完整的红利估值监控规则。"
+            )
+            return
+        selected_yield = "dividend_yield1" if CSI_DIVIDEND_YIELD_FIELD == "股息率1" else "dividend_yield2"
+        if valuation[selected_yield] is None:
+            await sent_message.edit_text(
+                "❌ 该 benchmark 当前无法通过中证估值接口获取股息率，\n"
+                "因此无法创建完整的红利估值监控规则。"
+            )
+            return
+
+        if not has_bond_history():
+            await sent_message.edit_text("已验证估值基准，正在首次建立中国十年期国债收益率本地历史...")
+            await backfill_cn10y()
+        asset_name = await get_asset_name_with_cache(asset_code, context)
+        benchmark_name = str(valuation["benchmark_name"] or benchmark_code)
+        now = datetime.now().isoformat()
+        try:
+            db_execute(
+                """
+                INSERT INTO opportunity_rules (
+                    user_id, asset_code, asset_name, benchmark_code, benchmark_name,
+                    min_score, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    update.effective_user.id,
+                    asset_code,
+                    asset_name,
+                    benchmark_code,
+                    benchmark_name,
+                    min_score,
+                    now,
+                    now,
+                ),
+                swallow_errors=False,
+            )
+        except sqlite3.IntegrityError:
+            await sent_message.edit_text("❌ 相同的资产—benchmark Opportunity Rule 已存在。")
+            return
+
+        rule = db_execute(
+            """
+            SELECT * FROM opportunity_rules
+            WHERE user_id = ? AND asset_code = ? AND benchmark_code = ?
+            """,
+            (update.effective_user.id, asset_code, benchmark_code),
+            fetchone=True,
+        )
+        created_rule_id = rule["id"]
+        snapshot = await evaluate_opportunity(rule, context, spot_price=price)
+        save_opportunity_snapshot(snapshot)
+        record_rule_evaluation(rule["id"], snapshot)
+        creation_complete = True
+        await sent_message.edit_text(
+            f"✅ Opportunity monitor created\n\n"
+            f"Asset: {asset_name} ({asset_code})\n"
+            f"Benchmark: {benchmark_name} ({benchmark_code})\n\n"
+            f"Current Score: {snapshot.total_score:.0f} / 100\n"
+            f"Level: {snapshot.level}"
+        )
+    except ValueError:
+        await update.message.reply_text("min_score 必须是数字。")
+    except Exception as exc:
+        logger.exception("添加 Opportunity Rule 失败: %s", exc)
+        if created_rule_id is not None and not creation_complete:
+            db_execute("DELETE FROM opportunity_snapshots WHERE rule_id = ?", (created_rule_id,))
+            db_execute("DELETE FROM opportunity_rules WHERE id = ?", (created_rule_id,))
+        if sent_message:
+            await sent_message.edit_text("添加 Opportunity Rule 时发生内部错误。")
+        else:
+            await update.message.reply_text("添加 Opportunity Rule 时发生内部错误。")
+
+
+@whitelisted_only
+async def list_opportunity_rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rules = db_execute(
+        "SELECT * FROM opportunity_rules WHERE user_id = ? ORDER BY id",
+        (update.effective_user.id,),
+        fetchall=True,
+    )
+    if not rules:
+        await update.message.reply_text("您还没有设置 Opportunity Rule。使用 /addop 添加。")
+        return
+    lines = ["<b>Opportunity Monitor 列表:</b>", ""]
+    for rule in rules:
+        icon = "🟢" if rule["is_active"] else "🔴"
+        score = "N/A" if rule["last_score"] is None else f"{rule['last_score']:.0f}"
+        asset_name = html.escape(str(rule["asset_name"] or rule["asset_code"]))
+        benchmark_name = html.escape(str(rule["benchmark_name"] or rule["benchmark_code"]))
+        lines.append(
+            f"{icon} <b>ID: {rule['id']}</b>\n"
+            f"  - {asset_name} (<code>{rule['asset_code']}</code>)\n"
+            f"  - Benchmark: {benchmark_name} (<code>{rule['benchmark_code']}</code>)\n"
+            f"  - Score: {score} | Level: {rule['last_level'] or 'N/A'}\n"
+            f"  - 告警阈值: {rule['min_score']:.0f}\n"
+        )
+    await update.message.reply_html("\n".join(lines))
+
+
+@whitelisted_only
+async def check_opportunity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if context.args:
+        try:
+            rule_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("正确格式: /opcheck [rule_id]")
+            return
+        rules = db_execute(
+            "SELECT * FROM opportunity_rules WHERE id = ? AND user_id = ? AND is_active = 1",
+            (rule_id, user_id),
+            fetchall=True,
+        )
+    else:
+        rules = db_execute(
+            "SELECT * FROM opportunity_rules WHERE user_id = ? AND is_active = 1 ORDER BY id",
+            (user_id,),
+            fetchall=True,
+        )
+    if not rules:
+        await update.message.reply_text("没有找到已激活的 Opportunity Rule。")
+        return
+    status = await update.message.reply_text("正在计算 Opportunity Score，请稍候...")
+    cache = context.bot_data.get(KEY_HIST_CACHE, {})
+    for index, rule in enumerate(rules):
+        snapshot = await evaluate_opportunity(rule, context, hist_df=cache.get(rule["asset_code"]))
+        save_opportunity_snapshot(snapshot)
+        record_rule_evaluation(rule["id"], snapshot)
+        for chunk in format_opportunity_chunks(snapshot):
+            if index == 0:
+                await status.edit_text(chunk, parse_mode=ParseMode.HTML)
+                index = -1
+            else:
+                await update.message.reply_html(chunk)
+
+
+@whitelisted_only
+async def delete_opportunity_rule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        rule_id = int(context.args[0])
+        rule = db_execute(
+            "SELECT id FROM opportunity_rules WHERE id = ? AND user_id = ?",
+            (rule_id, update.effective_user.id),
+            fetchone=True,
+        )
+        if not rule:
+            await update.message.reply_text("未找到该 Opportunity Rule，或规则不属于您。")
+            return
+        db_execute("DELETE FROM opportunity_snapshots WHERE rule_id = ?", (rule_id,))
+        db_execute("DELETE FROM opportunity_rules WHERE id = ?", (rule_id,))
+        await update.message.reply_text(f"✅ Opportunity Rule ID: {rule_id} 已删除。")
+    except (ValueError, IndexError):
+        await update.message.reply_text("正确格式: /delop <rule_id>")
+
+
+@whitelisted_only
+async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    command = update.message.text.split()[0].lower()
+    try:
+        rule_id = int(context.args[0])
+    except (ValueError, IndexError):
+        await update.message.reply_text(f"正确格式: {command} <rule_id>")
+        return
+    rule = db_execute(
+        "SELECT id FROM opportunity_rules WHERE id = ? AND user_id = ?",
+        (rule_id, update.effective_user.id),
+        fetchone=True,
+    )
+    if not rule:
+        await update.message.reply_text("未找到该 Opportunity Rule，或规则不属于您。")
+        return
+    active = 1 if command == "/opon" else 0
+    if active:
+        db_execute(
+            """
+            UPDATE opportunity_rules
+            SET is_active = 1, last_score = NULL, last_level = NULL,
+                last_alert_score = NULL, last_alert_level = NULL, last_alert_at = NULL,
+                updated_at = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (datetime.now().isoformat(), rule_id, update.effective_user.id),
+        )
+    else:
+        db_execute(
+            "UPDATE opportunity_rules SET is_active = 0, updated_at = ? WHERE id = ? AND user_id = ?",
+            (datetime.now().isoformat(), rule_id, update.effective_user.id),
+        )
+    await update.message.reply_text(f"✅ Opportunity Rule ID: {rule_id} 已{'开启' if active else '关闭'}。")
 
 
 @whitelisted_only
@@ -141,9 +401,7 @@ async def check_rsi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if hist_df is None:
             logger.info(f"/check: 缓存未命中，为 {code} 单独获取历史数据。")
             await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
-            hist_df = await get_history_data(code, HIST_FETCH_DAYS)
-            if hist_df is not None and not hist_df.empty:
-                cache[code] = hist_df
+            hist_df = await get_history_data_cached(context, code, HIST_FETCH_DAYS)
 
         # Bug3: 统一检查 None 和 empty
         if hist_df is None or hist_df.empty:
@@ -154,7 +412,7 @@ async def check_rsi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rsi_value = calculate_rsi(prices)
         rsi_results[code] = f"{rsi_value:.2f}" if rsi_value is not None else "计算失败"
 
-    message = f"<b>📈 最新RSI值查询结果:</b>\n\n"
+    message = "<b>📈 最新RSI值查询结果:</b>\n\n"
     for code, code_rules in rules_by_code.items():
         asset_name = code_rules[0]['asset_name']
         rsi_val_str = rsi_results.get(code, "未查询")
@@ -225,7 +483,7 @@ async def add_rule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await sent_message.edit_text(f"✅ 规则已添加:\n[{asset_name}({asset_code})] RSI区间: {rsi_min}-{rsi_max}")
         except sqlite3.IntegrityError:
-            await sent_message.edit_text(f"❌ 错误：完全相同的规则 (代码和RSI区间) 已存在。")
+            await sent_message.edit_text("❌ 错误：完全相同的规则 (代码和RSI区间) 已存在。")
     except ValueError:
         await update.message.reply_text("命令格式错误：RSI值必须是数字。")
     except Exception as e:

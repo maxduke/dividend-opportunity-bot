@@ -38,6 +38,7 @@ VOLUME /app/data
 
 # 复制应用代码
 COPY --chown=appuser:appuser src/ ./src/
+COPY --chown=appuser:appuser scripts/ ./scripts/
 
 # 环境变量
 ENV DB_FILE=/app/data/rules.db \

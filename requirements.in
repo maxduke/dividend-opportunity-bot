@@ -1,5 +1,7 @@
 python-telegram-bot[job-queue]
 akshare
+akshare-proxy-patch==0.5.0
+requests
 pandas
 pytz
 pandas_market_calendars

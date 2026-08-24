@@ -11,7 +11,11 @@ import pandas_market_calendars as mcal
 import pytz
 import requests
 
-from .config import EM_BLOCK_CHECK_INTERVAL_SECONDS, EM_BLOCK_CHECK_URL
+from .config import (
+    ENABLE_AKSHARE_PROXY_PATCH,
+    EM_BLOCK_CHECK_INTERVAL_SECONDS,
+    EM_BLOCK_CHECK_URL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +25,6 @@ CHINA_CALENDAR = mcal.get_calendar('XSHG')
 _em_block_lock = asyncio.Lock()
 _em_block_cache: Dict[str, Union[bool, datetime, None]] = {"blocked": None, "checked_at": None}
 
-_trade_day_lock = asyncio.Lock()
 _trade_day_cache: Dict[str, Union[set, datetime, None]] = {"days": None, "loaded_at": None}
 
 
@@ -46,10 +49,12 @@ def is_trading_day(check_date: datetime) -> bool:
     loaded_at = _trade_day_cache.get("loaded_at")
     need_refresh = not loaded_at or loaded_at.date() != today_cn
     if need_refresh:
+        # Cache even a failed provider lookup for this day; otherwise the
+        # 60-second monitor loop would repeat the same calendar request.
+        _trade_day_cache["loaded_at"] = datetime.now()
         trade_days = _load_trade_days_from_ak()
         if trade_days is not None:
             _trade_day_cache["days"] = trade_days
-            _trade_day_cache["loaded_at"] = datetime.now()
 
     trade_days_cache = _trade_day_cache.get("days")
     if isinstance(trade_days_cache, set) and cn_date <= today_cn:
@@ -70,6 +75,10 @@ def is_market_hours() -> bool:
 
 async def is_em_blocked() -> bool:
     """检测东方财富接口是否被封禁，带异步锁保护。"""
+    if ENABLE_AKSHARE_PROXY_PATCH:
+        # The patch already routes the selected EastMoney requests through its
+        # proxy; probing an unpatched EastMoney endpoint would add noise.
+        return False
     async with _em_block_lock:
         now = datetime.now()
         last_checked = _em_block_cache.get("checked_at")

@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import pandas as pd
-import pytest
 
 from src.data_fetcher import calculate_rsi_exact
 

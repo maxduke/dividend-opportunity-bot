@@ -1,0 +1,26 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: pytest tests/ -q
+      - name: Optional live AKShare smoke test
+        env:
+          RUN_LIVE_AKSHARE_TESTS: ${{ vars.RUN_LIVE_AKSHARE_TESTS || '0' }}
+        run: |
+          if [ "$RUN_LIVE_AKSHARE_TESTS" = "1" ]; then
+            python scripts/verify_data_sources.py
+          else
+            echo "RUN_LIVE_AKSHARE_TESTS is not 1; live test skipped."
+          fi

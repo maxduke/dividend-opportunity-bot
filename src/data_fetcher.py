@@ -14,20 +14,25 @@ from telegram.ext import ContextTypes
 
 from .config import (
     ADMIN_USER_ID,
+    AKSHARE_CALL_TIMEOUT_SECONDS,
+    AKSHARE_PROXY_CALL_TIMEOUT_SECONDS,
+    ENABLE_AKSHARE_PROXY_PATCH,
     ETF_PREFIXES,
     FETCH_FAILURE_THRESHOLD,
     FETCH_RETRY_ATTEMPTS,
     FETCH_RETRY_DELAY_SECONDS,
-    HIST_FETCH_DAYS,
+    HISTORY_FAILURE_COOLDOWN_MINUTES,
     KEY_CACHE_DATE,
     KEY_FAILURE_COUNT,
     KEY_FAILURE_SENT,
     KEY_HIST_CACHE,
+    KEY_HIST_FAILURE_CACHE,
     KEY_NAME_CACHE,
     NAME_CACHE_MAX_SIZE,
     REQUEST_INTERVAL_SECONDS,
     RSI_PERIOD,
     STOCK_PREFIXES,
+    TECHNICAL_HISTORY_DAYS,
     USE_ADJUST,
 )
 from .market import is_em_blocked
@@ -38,19 +43,83 @@ logger = logging.getLogger(__name__)
 
 # --- 重试逻辑（改进5: 指数退避） ---
 
-async def _run_with_retries(operation, description: str):
-    for attempt in range(1, FETCH_RETRY_ATTEMPTS + 1):
+async def _run_with_retries(operation, description: str, attempts: int = None):
+    attempts = FETCH_RETRY_ATTEMPTS if attempts is None else attempts
+    for attempt in range(1, attempts + 1):
         result = await operation()
         if result is not None:
             return result
-        if attempt < FETCH_RETRY_ATTEMPTS:
+        if attempt < attempts:
             delay = FETCH_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
             logger.warning(
                 f"{description} 失败，{delay}秒后重试 "
-                f"({attempt}/{FETCH_RETRY_ATTEMPTS})。"
+                f"({attempt}/{attempts})。"
             )
             await asyncio.sleep(delay)
     return None
+
+
+async def _call_akshare(function, *args, timeout_seconds=None, **kwargs):
+    """Run a blocking provider call without blocking the bot event loop."""
+    timeout = AKSHARE_CALL_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(function, *args, **kwargs),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "AKShare调用超时(%ss): %s",
+            timeout,
+            getattr(function, "__name__", repr(function)),
+        )
+        return None
+
+
+def _em_retry_attempts():
+    # The proxy itself already retries target requests; an application retry
+    # would multiply billed attempts.
+    return 1 if ENABLE_AKSHARE_PROXY_PATCH else None
+
+
+def _valid_close_count(frame) -> int:
+    if frame is None or getattr(frame, "empty", True):
+        return 0
+    column = "收盘" if "收盘" in frame.columns else "close" if "close" in frame.columns else None
+    if column is None:
+        return 0
+    return int(pd.to_numeric(frame[column], errors="coerce").notna().sum())
+
+
+def history_is_sufficient(frame, days: int) -> bool:
+    minimum = 252 if days >= TECHNICAL_HISTORY_DAYS else RSI_PERIOD + 1
+    return _valid_close_count(frame) >= minimum
+
+
+def _cached_history_is_usable(frame, days: int) -> bool:
+    return (
+        frame is not None
+        and frame.attrs.get("technical_history_days", 0) >= days
+        and history_is_sufficient(frame, days)
+    )
+
+
+def history_failure_is_fresh(context: ContextTypes.DEFAULT_TYPE, asset_code: str, now=None) -> bool:
+    if HISTORY_FAILURE_COOLDOWN_MINUTES <= 0:
+        return False
+    failed_at = context.bot_data.get(KEY_HIST_FAILURE_CACHE, {}).get(str(asset_code))
+    if not failed_at:
+        return False
+    try:
+        failed_at = datetime.fromisoformat(str(failed_at))
+        if failed_at.tzinfo is None:
+            failed_at = pytz.timezone("Asia/Shanghai").localize(failed_at)
+        current = now or datetime.now(pytz.timezone("Asia/Shanghai"))
+        if current.tzinfo is None:
+            current = pytz.timezone("Asia/Shanghai").localize(current)
+        return (current - failed_at).total_seconds() < HISTORY_FAILURE_COOLDOWN_MINUTES * 60
+    except (TypeError, ValueError):
+        return False
 
 
 # --- 缓存 ---
@@ -61,6 +130,7 @@ def ensure_daily_history_cache(context: ContextTypes.DEFAULT_TYPE, now: datetime
     if bot_data.get(KEY_CACHE_DATE) != today_str:
         logger.info(f"日期变更或首次运行，清空并重建 {today_str} 的历史数据缓存。")
         bot_data[KEY_HIST_CACHE] = {}
+        bot_data[KEY_HIST_FAILURE_CACHE] = {}
         bot_data[KEY_CACHE_DATE] = today_str
     return bot_data.get(KEY_HIST_CACHE, {})
 
@@ -72,6 +142,8 @@ async def get_asset_name_with_cache(asset_code: str, context: ContextTypes.DEFAU
     # 确保 bot_data 中存的是 OrderedDict
     if not isinstance(name_cache, OrderedDict):
         name_cache = OrderedDict(name_cache)
+        context.bot_data[KEY_NAME_CACHE] = name_cache
+    elif KEY_NAME_CACHE not in context.bot_data:
         context.bot_data[KEY_NAME_CACHE] = name_cache
 
     if asset_code in name_cache:
@@ -85,20 +157,36 @@ async def get_asset_name_with_cache(asset_code: str, context: ContextTypes.DEFAU
 
     async def fetch_name():
         if asset_code.startswith(STOCK_PREFIXES):
-            info_df = await asyncio.to_thread(ak.stock_individual_info_em, symbol=asset_code)
+            info_df = await _call_akshare(
+                ak.stock_individual_info_em,
+                symbol=asset_code,
+                timeout_seconds=AKSHARE_PROXY_CALL_TIMEOUT_SECONDS if ENABLE_AKSHARE_PROXY_PATCH else None,
+            )
             if info_df is not None and not info_df.empty and 'value' in info_df.columns:
                 match = info_df.loc[info_df['item'] == '股票简称', 'value']
                 if not match.empty:
                     return match.iloc[0]
         if asset_code.startswith(ETF_PREFIXES):
-            name_df = await asyncio.to_thread(ak.fund_name_em)
+            if ENABLE_AKSHARE_PROXY_PATCH:
+                # akshare-proxy-patch deliberately bypasses .js/.html URLs;
+                # fund_name_em would therefore hit EastMoney directly.
+                logger.info("proxy 模式跳过 fund_name_em(.js)，使用代码作为 ETF 名称回退")
+                return None
+            name_df = await _call_akshare(
+                ak.fund_name_em,
+                timeout_seconds=AKSHARE_PROXY_CALL_TIMEOUT_SECONDS if ENABLE_AKSHARE_PROXY_PATCH else None,
+            )
             if name_df is not None and not name_df.empty:
                 match = name_df.loc[name_df['基金代码'] == asset_code, '基金简称']
                 if not match.empty:
                     return match.iloc[0]
         return None
 
-    name = await _run_with_retries(fetch_name, f"获取资产名称({asset_code})")
+    name = await _run_with_retries(
+        fetch_name,
+        f"获取资产名称({asset_code})",
+        attempts=_em_retry_attempts(),
+    )
     if not name:
         name = f"Asset_{asset_code}"
 
@@ -124,22 +212,30 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
         async def fetch_hist_em():
             try:
                 if asset_code.startswith(STOCK_PREFIXES):
-                    return await asyncio.to_thread(
+                    return await _call_akshare(
                         ak.stock_zh_a_hist,
                         symbol=asset_code,
                         period="daily",
                         start_date=start_date,
                         end_date=end_date,
                         adjust=adjust,
+                        timeout_seconds=(
+                            AKSHARE_PROXY_CALL_TIMEOUT_SECONDS
+                            if ENABLE_AKSHARE_PROXY_PATCH else None
+                        ),
                     )
                 if asset_code.startswith(ETF_PREFIXES):
-                    return await asyncio.to_thread(
+                    return await _call_akshare(
                         ak.fund_etf_hist_em,
                         symbol=asset_code,
                         period="daily",
                         start_date=start_date,
                         end_date=end_date,
                         adjust=adjust,
+                        timeout_seconds=(
+                            AKSHARE_PROXY_CALL_TIMEOUT_SECONDS
+                            if ENABLE_AKSHARE_PROXY_PATCH else None
+                        ),
                     )
             except Exception as e:
                 logger.warning(f"东方财富接口获取历史数据失败({asset_code}): {e}")
@@ -149,7 +245,7 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
             try:
                 sina_symbol = get_sina_symbol(asset_code)
                 if asset_code.startswith(STOCK_PREFIXES):
-                    return await asyncio.to_thread(
+                    return await _call_akshare(
                         ak.stock_zh_a_daily,
                         symbol=sina_symbol,
                         start_date=start_date,
@@ -157,7 +253,7 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
                         adjust=adjust,
                     )
                 if asset_code.startswith(ETF_PREFIXES):
-                    return await asyncio.to_thread(
+                    return await _call_akshare(
                         ak.fund_etf_hist_sina,
                         symbol=sina_symbol,
                     )
@@ -168,30 +264,90 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
         use_em = not await is_em_blocked()
         df = None
         source = "sina"
-        if use_em:
+        proxy_can_use_free_history = not (
+            USE_ADJUST and asset_code.startswith(ETF_PREFIXES)
+        )
+        if ENABLE_AKSHARE_PROXY_PATCH and proxy_can_use_free_history:
+            # Sina is not in the proxy hook list. Use it first and pay for
+            # EastMoney only when Sina is unavailable or too short. Adjusted
+            # ETF history is the exception because Sina only supplies raw data.
+            df = await _run_with_retries(fetch_hist_sina, f"获取历史数据-新浪({asset_code})")
+            if not history_is_sufficient(df, days):
+                logger.info(f"新浪历史数据不足，才尝试东方财富({asset_code})。")
+                em_df = await _run_with_retries(
+                    fetch_hist_em,
+                    f"获取历史数据({asset_code})",
+                    attempts=_em_retry_attempts(),
+                )
+                if em_df is not None and (
+                    df is None or _valid_close_count(em_df) >= _valid_close_count(df)
+                ):
+                    df = em_df
+                    source = "em"
+        elif use_em:
             df = await _run_with_retries(fetch_hist_em, f"获取历史数据({asset_code})")
             source = "em"
         # Bug3: 统一使用 is None or empty 判断
-        if df is None or df.empty:
+        if not history_is_sufficient(df, days):
             logger.info(f"尝试使用新浪接口获取历史数据({asset_code})。")
-            df = await _run_with_retries(fetch_hist_sina, f"获取历史数据-新浪({asset_code})")
-            source = "sina"
+            sina_df = await _run_with_retries(fetch_hist_sina, f"获取历史数据-新浪({asset_code})")
+            if sina_df is not None and (
+                df is None or _valid_close_count(sina_df) >= _valid_close_count(df)
+            ):
+                df = sina_df
+                source = "sina"
         if df is None or df.empty:
             return None
         df = normalize_hist_df(df)
         if df is None or df.empty or "日期" not in df.columns:
             return None
         df.set_index("日期", inplace=True)
+        df.attrs["technical_history_days"] = days
         if USE_ADJUST:
             if source == "sina" and asset_code.startswith(ETF_PREFIXES):
                 logger.info(f"ETF({asset_code}) 使用新浪历史数据，仅能提供不复权数据。")
                 df.attrs["adjust_factor"] = 1.0
+                df.attrs["price_basis"] = "unadjusted_fallback"
             else:
                 df.attrs['adjust_factor'] = await _get_adjust_factor(asset_code, df)
+                df.attrs["price_basis"] = "qfq"
+        else:
+            df.attrs["price_basis"] = "unadjusted"
         return df
     except Exception as e:
         logger.error(f"获取 {asset_code} 历史数据失败: {e}")
         return None
+
+
+async def get_history_data_cached(
+    context: ContextTypes.DEFAULT_TYPE,
+    asset_code: str,
+    days: int,
+    now: datetime = None,
+) -> Union[pd.DataFrame, None]:
+    """Share one daily history attempt across jobs and commands."""
+    current = now or datetime.now(pytz.timezone("Asia/Shanghai"))
+    cache = ensure_daily_history_cache(context, current)
+    cached = cache.get(asset_code)
+    if _cached_history_is_usable(cached, days):
+        return cached
+    if history_failure_is_fresh(context, asset_code, current):
+        return cached
+
+    fetched = await get_history_data(asset_code, days)
+    failures = context.bot_data.setdefault(KEY_HIST_FAILURE_CACHE, {})
+    if fetched is None or fetched.empty:
+        failures[asset_code] = current.isoformat()
+        return cached
+
+    cache[asset_code] = fetched
+    if history_is_sufficient(fetched, days):
+        failures.pop(asset_code, None)
+    else:
+        # Keep the usable partial history for RSI, but do not pay again every
+        # monitoring tick while MA200/52W data is still unavailable.
+        failures[asset_code] = current.isoformat()
+    return fetched
 
 
 async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
@@ -210,22 +366,30 @@ async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
         async def fetch_raw_hist_em():
             try:
                 if asset_code.startswith(STOCK_PREFIXES):
-                    return await asyncio.to_thread(
+                    return await _call_akshare(
                         ak.stock_zh_a_hist,
                         symbol=asset_code,
                         period="daily",
                         start_date=raw_start,
                         end_date=raw_end,
                         adjust="",
+                        timeout_seconds=(
+                            AKSHARE_PROXY_CALL_TIMEOUT_SECONDS
+                            if ENABLE_AKSHARE_PROXY_PATCH else None
+                        ),
                     )
                 if asset_code.startswith(ETF_PREFIXES):
-                    return await asyncio.to_thread(
+                    return await _call_akshare(
                         ak.fund_etf_hist_em,
                         symbol=asset_code,
                         period="daily",
                         start_date=raw_start,
                         end_date=raw_end,
                         adjust="",
+                        timeout_seconds=(
+                            AKSHARE_PROXY_CALL_TIMEOUT_SECONDS
+                            if ENABLE_AKSHARE_PROXY_PATCH else None
+                        ),
                     )
             except Exception as e:
                 logger.warning(f"东方财富接口获取未复权数据失败({asset_code}): {e}")
@@ -235,7 +399,7 @@ async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
             try:
                 if asset_code.startswith(STOCK_PREFIXES):
                     sina_symbol = get_sina_symbol(asset_code)
-                    return await asyncio.to_thread(
+                    return await _call_akshare(
                         ak.stock_zh_a_daily,
                         symbol=sina_symbol,
                         start_date=raw_start,
@@ -244,7 +408,7 @@ async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
                     )
                 if asset_code.startswith(ETF_PREFIXES):
                     sina_symbol = get_sina_symbol(asset_code)
-                    return await asyncio.to_thread(
+                    return await _call_akshare(
                         ak.fund_etf_hist_sina,
                         symbol=sina_symbol,
                     )
@@ -257,12 +421,16 @@ async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> float:
         sina_attempted = False
 
         prefer_sina_for_etf_raw = USE_ADJUST and asset_code.startswith(ETF_PREFIXES)
-        if prefer_sina_for_etf_raw:
+        if ENABLE_AKSHARE_PROXY_PATCH or prefer_sina_for_etf_raw:
             sina_attempted = True
             raw_df = await _run_with_retries(fetch_raw_hist_sina, f"获取未复权数据-新浪({asset_code})")
 
         if (raw_df is None or raw_df.empty) and use_em:
-            raw_df = await _run_with_retries(fetch_raw_hist_em, f"获取未复权数据({asset_code})")
+            raw_df = await _run_with_retries(
+                fetch_raw_hist_em,
+                f"获取未复权数据({asset_code})",
+                attempts=_em_retry_attempts(),
+            )
 
         if (raw_df is None or raw_df.empty) and not sina_attempted:
             logger.info(f"尝试使用新浪接口获取未复权数据({asset_code})。")
@@ -313,9 +481,11 @@ async def _fetch_single_realtime_price(code: str) -> Union[float, None]:
 
     async def fetch_price():
         try:
-            df = await asyncio.to_thread(ak.stock_zh_a_minute, symbol=sina_symbol, period='1')
+            df = await _call_akshare(ak.stock_zh_a_minute, symbol=sina_symbol, period='1')
             if df is not None and not df.empty:
                 return float(df.iloc[-1]['close'])
+        except asyncio.TimeoutError:
+            logger.warning(f"获取 {code} 实时价格超时")
         except Exception as e:
             logger.warning(f"获取 {code} 实时价格失败: {e}")
         return None
@@ -344,7 +514,7 @@ async def _fetch_all_spot_data(context: ContextTypes.DEFAULT_TYPE, codes: List[s
             admin_message = (f"🚨 **机器人警报** 🚨\n\n连续获取数据失败已达 **{count}** 次。\n请检查新浪接口连通性。")
             try:
                 await context.bot.send_message(chat_id=ADMIN_USER_ID, text=admin_message, parse_mode=ParseMode.MARKDOWN)
-                logger.warning(f"已向管理员发送数据获取失败的警报通知。")
+                logger.warning("已向管理员发送数据获取失败的警报通知。")
                 context.bot_data[KEY_FAILURE_SENT] = True
             except Exception as e:
                 logger.error(f"向管理员发送数据获取失败告警时出错: {e}")

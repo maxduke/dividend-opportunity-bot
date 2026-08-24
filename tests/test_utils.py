@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import pandas as pd
-import pytest
 
 from src.utils import normalize_hist_df, get_sina_symbol
 
