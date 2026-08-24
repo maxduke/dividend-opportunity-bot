@@ -31,6 +31,12 @@ def _prepare_db_directory() -> Path:
         raise PermissionError(error) from exc
     if not os.access(directory, os.W_OK | os.X_OK):
         raise PermissionError(error)
+    if db_path.exists() and not os.access(db_path, os.R_OK | os.W_OK):
+        raise PermissionError(
+            f"DB_FILE={DB_FILE} directory={directory} uid={os.getuid()} gid={os.getgid()} "
+            "database file is not readable/writable; ensure the bind-mounted file ownership "
+            "matches the container user (10001:10001)."
+        )
     return db_path
 
 

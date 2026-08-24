@@ -4,7 +4,7 @@ import asyncio
 import logging
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
@@ -189,6 +189,7 @@ def build_indicator_close_series(
         quote_time is not None
         and quote_time.date() == today
         and quote_time <= current
+        and quote_time.time() >= time(9, 30)
         and trading_today
     )
 
@@ -244,6 +245,9 @@ def build_indicator_close_series(
         degraded = True
     elif quote_time > current:
         note = "Realtime quote timestamp is in the future; using the latest confirmed qfq close"
+        degraded = True
+    elif quote_time.time() < time(9, 30):
+        note = "Realtime quote timestamp is before market open; using the latest confirmed qfq close"
         degraded = True
     return IndicatorPriceSeries(closes, latest_price, latest_date, False, degraded, note)
 

@@ -105,3 +105,29 @@ def test_db_preflight_rejects_unwritable_parent(monkeypatch, tmp_path):
     assert f"gid={database.os.getgid()}" in message
     assert "10001:10001" in message
     assert "directory is not writable" in message
+
+
+def test_db_preflight_rejects_readonly_existing_file(monkeypatch, tmp_path):
+    from src import database
+
+    _close_database(database)
+    db_file = tmp_path / "rules.db"
+    db_file.touch(mode=0o400)
+    monkeypatch.setattr(database, "DB_FILE", str(db_file))
+    real_access = database.os.access
+    monkeypatch.setattr(
+        database.os,
+        "access",
+        lambda path, mode: False
+        if path == db_file and mode == (database.os.R_OK | database.os.W_OK)
+        else real_access(path, mode),
+    )
+
+    with pytest.raises(PermissionError) as error:
+        database.db_init()
+
+    message = str(error.value)
+    assert f"DB_FILE={db_file}" in message
+    assert f"directory={tmp_path.resolve()}" in message
+    assert "database file is not readable/writable" in message
+    assert "10001:10001" in message
