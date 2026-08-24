@@ -49,6 +49,7 @@ def _snapshot(score, level):
         snapshot_at="2026-08-13T10:00:00+08:00",
         total_score=score,
         level=level,
+        technical_price_basis="qfq_history_close",
     )
 
 
@@ -181,6 +182,8 @@ def test_unadjusted_etf_fallback_disables_long_term_metrics(monkeypatch):
         "src.opportunity.get_cached_valuation",
         AsyncMock(return_value=None),
     )
+    history_fetch = AsyncMock(side_effect=AssertionError("supplied history must stay deterministic"))
+    monkeypatch.setattr("src.opportunity.get_history_data_cached", history_fetch)
 
     snapshot = asyncio.run(
         evaluate_opportunity(_rule(), context, spot_price=90, hist_df=history)
@@ -188,8 +191,63 @@ def test_unadjusted_etf_fallback_disables_long_term_metrics(monkeypatch):
 
     assert snapshot.ma200 is None
     assert snapshot.high_52w is None
+    assert snapshot.rsi6 is None
     assert snapshot.long_term_score == 0
     assert "Adjusted ETF history unavailable" in snapshot.data_notes[0]
+    history_fetch.assert_not_awaited()
+
+
+def test_degraded_detail_separates_spot_and_technical_price():
+    snapshot = _snapshot(48, "WATCH")
+    snapshot.price = 1.433
+    snapshot.spot_price = 1.453
+    snapshot.technical_price_date = "2026-08-21"
+    snapshot.technical_price_basis = "unavailable"
+
+    detail = format_opportunity_detail(snapshot)
+
+    assert "⚠️ <b>Partial score</b>" in detail
+    assert "Spot: 1.453" in detail
+    assert "Technical Price: 1.433" in detail
+    assert "Technical Date: 2026-08-21" in detail
+    assert "Current: 1.433" not in detail
+
+
+def test_alert_gate_suppresses_only_missing_runtime_technical_basis():
+    rule = _rule(last_score=40, min_score=60)
+    degraded = _snapshot(70, "MODERATE")
+    degraded.technical_price_basis = "unavailable"
+    assert should_send_opportunity_alert(rule, degraded)[0] is False
+
+    qfq_with_thin_valuation_history = _snapshot(70, "MODERATE")
+    qfq_with_thin_valuation_history.technical_price_basis = "qfq_history_close"
+    qfq_with_thin_valuation_history.data_quality = "INSUFFICIENT_VALUATION_HISTORY"
+    assert should_send_opportunity_alert(rule, qfq_with_thin_valuation_history)[0] is True
+
+
+def test_recovered_qfq_history_restores_all_technical_factors(monkeypatch):
+    history = pd.DataFrame(
+        {"收盘": [100.0 + i * 0.01 for i in range(550)]},
+        index=pd.date_range("2025-01-01", periods=550),
+    )
+    history.attrs.update(
+        technical_history_days=550,
+        price_basis="qfq",
+        price_basis_asof="2026-08-24",
+    )
+    monkeypatch.setattr("src.opportunity.get_cached_valuation", AsyncMock(return_value=None))
+    history_fetch = AsyncMock(side_effect=AssertionError("supplied qfq history must stay deterministic"))
+    monkeypatch.setattr("src.opportunity.get_history_data_cached", history_fetch)
+
+    snapshot = asyncio.run(
+        evaluate_opportunity(_rule(), SimpleNamespace(bot_data={}), spot_price=105.5, hist_df=history)
+    )
+
+    assert snapshot.technical_price_basis == "qfq_history_close"
+    assert snapshot.ma200 is not None
+    assert snapshot.high_52w is not None
+    assert snapshot.rsi6 is not None
+    history_fetch.assert_not_awaited()
 
 
 def test_future_valuation_date_is_stale_and_cannot_raise_level(monkeypatch):

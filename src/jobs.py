@@ -31,7 +31,7 @@ from .data_fetcher import (
     ensure_daily_history_cache,
     get_history_data_cached,
     history_failure_is_fresh,
-    history_is_sufficient,
+    runtime_history_is_usable,
 )
 from .database import db_execute
 from .market import is_market_hours, is_trading_day
@@ -55,11 +55,7 @@ async def _load_opportunity_history(context, codes, now):
     cache = ensure_daily_history_cache(context, now)
     missing = [
         code for code in codes
-        if (
-            (cached := cache.get(code)) is None
-            or cached.attrs.get("technical_history_days", 0) < TECHNICAL_HISTORY_DAYS
-            or not history_is_sufficient(cached, TECHNICAL_HISTORY_DAYS)
-        )
+        if not runtime_history_is_usable(cache.get(code), TECHNICAL_HISTORY_DAYS, now)
         and not history_failure_is_fresh(context, code, now)
     ]
     for index, code in enumerate(missing):
@@ -150,7 +146,15 @@ async def _evaluate_opportunity_rules(context, rules, quotes, history, now):
                 rule,
                 context,
                 quote=quote,
-                hist_df=history.get(rule["asset_code"]),
+                hist_df=(
+                    cached
+                    if runtime_history_is_usable(
+                        (cached := history.get(rule["asset_code"])),
+                        TECHNICAL_HISTORY_DAYS,
+                        now,
+                    )
+                    else None
+                ),
             )
             alerts_today = _opportunity_alerts_today(rule["id"], now)
             should_alert, reason = should_send_opportunity_alert(
@@ -208,7 +212,15 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
                 rule,
                 context,
                 quote=quote,
-                hist_df=history.get(rule["asset_code"]),
+                hist_df=(
+                    cached
+                    if runtime_history_is_usable(
+                        (cached := history.get(rule["asset_code"])),
+                        TECHNICAL_HISTORY_DAYS,
+                        now,
+                    )
+                    else None
+                ),
             )
             save_opportunity_snapshot(snapshot)
             record_rule_evaluation(rule["id"], snapshot, now)
@@ -222,6 +234,15 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
     today = now.strftime("%Y年%m月%d日")
     for user_id, user_rules in rules_by_user.items():
         message = f"📰 <b>收盘前 Opportunity 简报 ({today})</b>\n\n"
+        if any(
+            snapshots.get(rule["id"]) is not None
+            and snapshots[rule["id"]].technical_price_basis == "unavailable"
+            for rule in user_rules
+        ):
+            message += (
+                "⚠️ Technical data degraded for one or more assets.\n"
+                "See /opcheck for details.\n\n"
+            )
         for rule in user_rules:
             snapshot = snapshots.get(rule["id"])
             if snapshot is None:
@@ -244,10 +265,13 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
                 if snapshot.drawdown_52w is not None else "N/A"
             )
             rsi = f"{snapshot.rsi6:.1f}" if snapshot.rsi6 is not None else "N/A"
+            technically_degraded = snapshot.technical_price_basis == "unavailable"
+            displayed_quality = "DEGRADED" if technically_degraded else snapshot.data_quality
             message += (
                 f"{snapshot.level} <b>{html.escape(snapshot.asset_name)}</b> ({snapshot.asset_code})\n"
                 f"  Score: <b>{snapshot.total_score:.0f}</b> | Level: {snapshot.level}\n"
-                f"  Mode: <code>{html.escape(snapshot.scoring_mode)}</code> | Data: <code>{html.escape(snapshot.data_quality)}</code>\n"
+                f"  Mode: <code>{html.escape(snapshot.scoring_mode)}</code> | Data: <code>{html.escape(displayed_quality)}</code>\n"
+                f"  Technical: {'unavailable' if technically_degraded else 'available'}\n"
                 f"  As of: Price {html.escape(snapshot.technical_price_date or 'N/A')} | Valuation {html.escape(snapshot.valuation_date or 'N/A')}\n"
                 f"  DY: {dy}\n"
                 f"  DY-CN10Y: {spread}\n"

@@ -30,6 +30,7 @@ from .data_fetcher import (
     build_indicator_close_series,
     calculate_rsi,
     get_history_data_cached,
+    runtime_history_is_usable,
 )
 from .database import db_execute
 from .market import trading_sessions_elapsed
@@ -70,6 +71,7 @@ class OpportunitySnapshot:
     benchmark_name: str
     snapshot_at: str
     price: Optional[float] = None
+    spot_price: Optional[float] = None
     rsi6: Optional[float] = None
     ma200: Optional[float] = None
     ma200_deviation: Optional[float] = None
@@ -128,15 +130,6 @@ def _row_value(row, key: str, default=None):
         return row[key]
     except (KeyError, IndexError, TypeError):
         return default
-
-
-def _cache_history_is_long_enough(frame) -> bool:
-    if frame is None or frame.empty or "收盘" not in frame.columns:
-        return False
-    return (
-        frame.attrs.get("technical_history_days", 0) >= TECHNICAL_HISTORY_DAYS
-        and valid_close_count(frame["收盘"]) >= 252
-    )
 
 
 def _match_bond(rows, target_date: date):
@@ -240,15 +233,11 @@ async def evaluate_opportunity(
     supplied_history = hist_df is not None
     if hist_df is None:
         hist_df = cache.get(asset_code)
-    needs_refetch = (
-        hist_df is None
-        or (supplied_history and (hist_df.empty or "收盘" not in hist_df.columns or valid_close_count(hist_df["收盘"]) < 252))
-        or (not supplied_history and not _cache_history_is_long_enough(hist_df))
-    )
-    if needs_refetch:
+    if not supplied_history and not runtime_history_is_usable(
+        hist_df, TECHNICAL_HISTORY_DAYS, now
+    ):
         fetched = await get_history_data_cached(context, asset_code, TECHNICAL_HISTORY_DAYS)
         if fetched is not None and not fetched.empty:
-            fetched.attrs["technical_history_days"] = TECHNICAL_HISTORY_DAYS
             cache[asset_code] = fetched
             hist_df = fetched
     if quote is None and isinstance(spot_price, RealtimeQuote):
@@ -430,6 +419,8 @@ async def evaluate_opportunity(
         dy_history_complete,
         spread_history_complete,
     )
+    if not technical_basis_available and data_quality == "INSUFFICIENT_TECHNICAL_HISTORY":
+        data_quality = "DEGRADED"
     if data_quality == "OK" and indicator_series.degraded:
         data_quality = "DEGRADED"
     if cn10y_source == "sina":
@@ -443,6 +434,7 @@ async def evaluate_opportunity(
         benchmark_name=benchmark_name,
         snapshot_at=now.isoformat(),
         price=current_price,
+        spot_price=_float_or_none(spot_price),
         rsi6=rsi6,
         ma200=ma200,
         ma200_deviation=ma_deviation,
@@ -607,6 +599,8 @@ def should_send_opportunity_alert(
     alerts_today: int = 0,
 ) -> tuple[bool, str]:
     now = now or _now()
+    if snapshot.technical_price_basis == "unavailable":
+        return False, "technical-data-unavailable"
     threshold = float(rule["min_score"])
     previous_score = _float_or_none(rule["last_score"])
     previous_level = rule["last_level"]
@@ -644,9 +638,28 @@ def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optio
         "level-upgrade": "机会等级升级",
     }.get(alert_reason or "")
     trigger_line = f"Trigger: <b>{trigger}</b>\n\n" if trigger else ""
+    partial_warning = (
+        "⚠️ <b>Partial score</b>\n\n"
+        "Adjusted technical history is unavailable.\n"
+        "MA200 / 52W drawdown / RSI6 are excluded from this result.\n"
+        "Do not interpret this as a complete 0–100 Opportunity Score.\n\n"
+        if snapshot.technical_price_basis == "unavailable"
+        else ""
+    )
+    price_lines = (
+        f"Current: {f(snapshot.spot_price if snapshot.spot_price is not None else snapshot.price, 3)}\n"
+        if snapshot.technical_price_basis == "qfq_realtime"
+        else (
+            f"Spot: {f(snapshot.spot_price, 3)}\n"
+            f"Technical Price: {f(snapshot.price, 3)}\n"
+            f"Technical Date: {html.escape(snapshot.technical_price_date or 'N/A')}\n"
+            f"Basis: {html.escape(snapshot.technical_price_basis or 'unavailable')}\n"
+        )
+    )
     return (
         f"{icon} <b>{snapshot.level} Opportunity</b>\n"
         f"Score: <b>{snapshot.total_score:.0f} / 100</b>\n\n"
+        f"{partial_warning}"
         f"{trigger_line}"
         f"{safe_asset} (<code>{html.escape(snapshot.asset_code)}</code>)\n"
         f"Benchmark: {safe_benchmark} (<code>{html.escape(snapshot.benchmark_code)}</code>)\n\n"
@@ -663,7 +676,7 @@ def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optio
         f" ({html.escape(snapshot.cn10y_source or 'N/A')})\n"
         f"Dividend-Bond Spread: {f(snapshot.dividend_bond_spread, 2, ' pp')}\n\n"
         f"📉 <b>Long-Term</b> {snapshot.long_term_score:.0f} / 30\n\n"
-        f"Current: {f(snapshot.price, 3)}\n"
+        f"{price_lines}"
         f"MA200: {f(snapshot.ma200, 3)}\n"
         f"Deviation: {f(None if snapshot.ma200_deviation is None else snapshot.ma200_deviation * 100, 2, '%')}\n"
         f"52W High: {f(snapshot.high_52w, 3)}\n"

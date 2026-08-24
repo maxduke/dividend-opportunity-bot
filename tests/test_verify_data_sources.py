@@ -54,11 +54,9 @@ def test_proxy_etf_smoke_calls_qfq(monkeypatch):
     from src import provider_bootstrap
 
     calls = []
-    proxy_cache = SimpleNamespace(data=None)
 
     def fetch_etf(**kwargs):
         calls.append(kwargs)
-        proxy_cache.data = {"authenticated": True}
         return pd.DataFrame({"收盘": [1.0] * 253})
 
     fake_requests = SimpleNamespace(
@@ -66,7 +64,6 @@ def test_proxy_etf_smoke_calls_qfq(monkeypatch):
     )
     monkeypatch.setattr(provider_bootstrap, "install_data_provider_patch", lambda: True)
     monkeypatch.setitem(sys.modules, "akshare", SimpleNamespace(fund_etf_hist_em=fetch_etf))
-    monkeypatch.setitem(sys.modules, "akshare_proxy_patch", SimpleNamespace(_cache=proxy_cache))
     monkeypatch.setitem(sys.modules, "requests", fake_requests)
 
     queued = []
@@ -81,5 +78,47 @@ def test_proxy_etf_smoke_calls_qfq(monkeypatch):
         "rows": 253,
         "valid_close": 253,
         "adjust": "qfq",
+        "proxy_route": "PATCH",
         "proxy_auth_fetched": True,
     })]
+
+
+def test_proxy_checks_require_balance_patch_and_qfq_route(monkeypatch, capsys):
+    responses = iter(
+        [
+            (True, {
+                "configured": True,
+                "state": "POSITIVE",
+                "balance": 12.0,
+                "checked_at": "2026-08-24T20:15:00+08:00",
+                "patch_active": True,
+            }),
+            (True, {"rows": 300, "valid_close": 300, "adjust": "qfq", "proxy_route": "PATCH"}),
+        ]
+    )
+    monkeypatch.setattr(verify_data_sources, "_isolated_call", lambda *args, **kwargs: next(responses))
+
+    assert verify_data_sources._check_proxy_interfaces("515180", timeout=1)
+    output = capsys.readouterr().out
+    assert "Proxy balance" in output
+    assert "Proxy patch" in output
+    assert "Proxy ETF history" in output
+    assert "12.0" in output
+
+
+def test_proxy_checks_fail_without_positive_balance_or_patch(monkeypatch, capsys):
+    responses = iter(
+        [
+            (False, {
+                "configured": True,
+                "state": "NO_BALANCE_OR_INVALID",
+                "balance": 0.0,
+                "checked_at": "2026-08-24T20:15:00+08:00",
+                "patch_active": False,
+            }),
+            (False, "proxy patch is disabled"),
+        ]
+    )
+    monkeypatch.setattr(verify_data_sources, "_isolated_call", lambda *args, **kwargs: next(responses))
+    assert not verify_data_sources._check_proxy_interfaces("515180", timeout=1)
+    assert "FAIL: no positive balance" in capsys.readouterr().out

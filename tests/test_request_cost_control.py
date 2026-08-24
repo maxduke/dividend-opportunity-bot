@@ -1,9 +1,17 @@
 import asyncio
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pandas as pd
+
+
+def _enable_paid_proxy(monkeypatch, data_fetcher):
+    """Keep request-cost tests focused on routing, not global health state."""
+    monkeypatch.setattr(data_fetcher, "check_proxy_balance_async", AsyncMock(
+        return_value=SimpleNamespace(state="POSITIVE")
+    ))
+    monkeypatch.setattr(data_fetcher, "proxy_patch_active", lambda: True)
 
 
 def test_proxy_disables_application_level_eastmoney_retries(monkeypatch):
@@ -29,6 +37,7 @@ def test_proxy_history_prefers_sina_and_skips_eastmoney(monkeypatch):
         return history.copy()
 
     monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    _enable_paid_proxy(monkeypatch, data_fetcher)
     monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
 
     result = asyncio.run(data_fetcher.get_history_data("000001", 550))
@@ -54,6 +63,7 @@ def test_adjusted_etf_history_uses_one_eastmoney_call(monkeypatch):
         return history.copy()
 
     monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    _enable_paid_proxy(monkeypatch, data_fetcher)
     monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
 
     result = asyncio.run(data_fetcher.get_history_data("510300", 550))
@@ -83,6 +93,7 @@ def test_history_price_adjust_is_forwarded_and_tagged(monkeypatch):
         return history.copy()
 
     monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    _enable_paid_proxy(monkeypatch, data_fetcher)
     monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
 
     result = asyncio.run(data_fetcher.get_history_data("510300", 550, price_adjust="hfq"))
@@ -122,6 +133,126 @@ def test_adjusted_etf_sina_fallback_is_marked_unadjusted(monkeypatch):
     assert result.attrs["price_basis_asof"] == datetime.now(
         data_fetcher.SHANGHAI_TZ
     ).date().isoformat()
+
+
+def test_runtime_zero_balance_skips_paid_etf_request(monkeypatch):
+    from src import data_fetcher
+
+    calls = []
+    raw = pd.DataFrame(
+        {
+            "日期": pd.date_range("2025-01-01", periods=300),
+            "收盘": [100.0] * 300,
+        }
+    )
+
+    async def fake_call(function, *args, **kwargs):
+        calls.append(function.__name__)
+        return raw.copy()
+
+    monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    monkeypatch.setattr(
+        data_fetcher,
+        "check_proxy_balance_async",
+        AsyncMock(return_value=SimpleNamespace(state="NO_BALANCE_OR_INVALID")),
+    )
+    monkeypatch.setattr(data_fetcher, "proxy_patch_active", lambda: True)
+    monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
+
+    result = asyncio.run(data_fetcher.get_history_data("510300", 550))
+
+    assert "fund_etf_hist_em" not in calls
+    assert calls == ["fund_etf_hist_sina"]
+    assert result.attrs["price_basis"] == "unadjusted_fallback"
+
+
+def _history_frame(*, basis, asof, rows=369):
+    frame = pd.DataFrame(
+        {
+            "收盘": [100.0] * rows,
+        },
+        index=pd.date_range("2025-01-01", periods=rows),
+    )
+    frame.attrs.update(
+        technical_history_days=550,
+        price_basis=basis,
+        price_basis_asof=asof,
+    )
+    return frame
+
+
+def test_runtime_history_requires_current_qfq_basis():
+    from src import data_fetcher
+
+    now = datetime.fromisoformat("2026-08-24T10:00:00+08:00")
+    raw = _history_frame(basis="unadjusted_fallback", asof="2026-08-24")
+    stale_qfq = _history_frame(basis="qfq", asof="2026-08-23")
+    current_qfq = _history_frame(basis="qfq", asof="2026-08-24")
+
+    assert not data_fetcher.runtime_history_is_usable(raw, 550, now)
+    assert not data_fetcher.runtime_history_is_usable(stale_qfq, 550, now)
+    assert data_fetcher.runtime_history_is_usable(current_qfq, 550, now)
+
+
+def test_raw_fallback_is_retained_but_marks_history_failure(monkeypatch):
+    from src import data_fetcher
+
+    now = datetime.fromisoformat("2026-08-24T10:00:00+08:00")
+    raw = _history_frame(basis="unadjusted_fallback", asof="2026-08-24")
+    fetch = AsyncMock(return_value=raw)
+    monkeypatch.setattr(data_fetcher, "get_history_data", fetch)
+    context = SimpleNamespace(bot_data={})
+
+    result = asyncio.run(data_fetcher.get_history_data_cached(context, "510300", 550, now))
+
+    assert result is raw
+    assert context.bot_data[data_fetcher.KEY_HIST_CACHE]["510300"] is raw
+    assert context.bot_data[data_fetcher.KEY_HIST_FAILURE_CACHE]["510300"] == now
+
+
+def test_raw_fallback_cooldown_skips_provider_call(monkeypatch):
+    from src import data_fetcher
+
+    now = datetime.fromisoformat("2026-08-24T10:00:00+08:00")
+    raw = _history_frame(basis="unadjusted_fallback", asof="2026-08-24")
+    fetch = AsyncMock(return_value=raw)
+    monkeypatch.setattr(data_fetcher, "get_history_data", fetch)
+    monkeypatch.setattr(data_fetcher, "HISTORY_FAILURE_COOLDOWN_MINUTES", 30)
+    context = SimpleNamespace(bot_data={})
+
+    asyncio.run(data_fetcher.get_history_data_cached(context, "510300", 550, now))
+    result = asyncio.run(
+        data_fetcher.get_history_data_cached(
+            context, "510300", 550, now + timedelta(minutes=5)
+        )
+    )
+
+    assert result is raw
+    fetch.assert_awaited_once()
+
+
+def test_qfq_retry_replaces_raw_fallback_and_clears_failure(monkeypatch):
+    from src import data_fetcher
+
+    now = datetime.fromisoformat("2026-08-24T10:00:00+08:00")
+    raw = _history_frame(basis="unadjusted_fallback", asof="2026-08-24")
+    qfq = _history_frame(basis="qfq", asof="2026-08-24")
+    fetch = AsyncMock(side_effect=[raw, qfq])
+    monkeypatch.setattr(data_fetcher, "get_history_data", fetch)
+    monkeypatch.setattr(data_fetcher, "HISTORY_FAILURE_COOLDOWN_MINUTES", 30)
+    context = SimpleNamespace(bot_data={})
+
+    asyncio.run(data_fetcher.get_history_data_cached(context, "510300", 550, now))
+    result = asyncio.run(
+        data_fetcher.get_history_data_cached(
+            context, "510300", 550, now + timedelta(minutes=31)
+        )
+    )
+
+    assert result is qfq
+    assert context.bot_data[data_fetcher.KEY_HIST_CACHE]["510300"] is qfq
+    assert "510300" not in context.bot_data[data_fetcher.KEY_HIST_FAILURE_CACHE]
+    assert fetch.await_count == 2
 
 
 def test_failed_history_is_not_retried_during_cooldown(monkeypatch):
@@ -221,7 +352,7 @@ def test_fresh_persisted_bond_skips_network(monkeypatch):
     from src import valuation_fetcher
 
     latest = {
-        "yield_date": date.today().isoformat(),
+        "yield_date": datetime.now(valuation_fetcher.SHANGHAI_TZ).date().isoformat(),
         "fetched_at": datetime.now(valuation_fetcher.SHANGHAI_TZ).isoformat(),
         "cn10y": 1.82,
         "source": "chinabond",

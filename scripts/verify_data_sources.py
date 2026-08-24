@@ -8,6 +8,7 @@ import sys
 from datetime import date, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
+from queue import Empty
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -89,19 +90,52 @@ def _result(name: str, ok: bool, detail: str = "") -> bool:
 
 
 def _isolated_worker(queue, operation: str, args: tuple):
+    patch_active = False
     try:
         if operation.startswith("proxy_") or operation == "history":
             from src.provider_bootstrap import install_data_provider_patch
 
             patch_active = install_data_provider_patch()
-            if operation.startswith("proxy_") and not patch_active:
+            if operation.startswith("proxy_") and operation != "proxy_health" and not patch_active:
                 queue.put((False, "proxy patch is disabled"))
                 return
+
+        if operation == "proxy_health":
+            from src.config import ENABLE_AKSHARE_PROXY_PATCH
+            from src.proxy_health import (
+                POSITIVE,
+                get_cached_proxy_balance_status,
+                proxy_patch_active,
+            )
+
+            status = get_cached_proxy_balance_status()
+            balance = getattr(status, "balance", None)
+            try:
+                balance = (
+                    float(balance)
+                    if balance is not None and not isinstance(balance, bool)
+                    else None
+                )
+            except (TypeError, ValueError):
+                balance = None
+            state = getattr(status, "state", "UNVERIFIED")
+            checked_at = getattr(status, "checked_at", None)
+            checked_at = checked_at.isoformat() if hasattr(checked_at, "isoformat") else checked_at
+            queue.put((
+                state == POSITIVE and balance is not None and math.isfinite(balance) and balance > 0,
+                {
+                    "configured": bool(ENABLE_AKSHARE_PROXY_PATCH),
+                    "state": state,
+                    "balance": balance,
+                    "checked_at": checked_at,
+                    "patch_active": bool(proxy_patch_active()),
+                },
+            ))
+            return
 
         import akshare as ak
 
         if operation.startswith("proxy_"):
-            import akshare_proxy_patch
             import requests
 
             from src.config import AKSHARE_PROXY_HOOK_DOMAINS
@@ -121,8 +155,6 @@ def _isolated_worker(queue, operation: str, args: tuple):
                 return original_direct_request(session, method, url, **kwargs)
 
             requests._OriginalSession.request = reject_target_direct_fallback
-
-            proxy_cache_before = akshare_proxy_patch._cache.data
 
             if operation == "proxy_stock_history":
                 frame = ak.stock_zh_a_hist(
@@ -154,9 +186,12 @@ def _isolated_worker(queue, operation: str, args: tuple):
             else:
                 raise ValueError(f"unknown proxy operation: {operation}")
 
-            result["proxy_auth_fetched"] = (
-                proxy_cache_before is None and akshare_proxy_patch._cache.data is not None
-            )
+            # The direct target request is blocked above.  Reaching this point
+            # therefore proves that the installed patch served the request.
+            result["proxy_route"] = "PATCH"
+            # Keep the old internal summary key for callers of this diagnostic
+            # helper; its value now comes from the blocked-fallback proof.
+            result["proxy_auth_fetched"] = True
             queue.put((ok, result))
             return
 
@@ -222,8 +257,15 @@ def _isolated_worker(queue, operation: str, args: tuple):
                 return
             close = pd.to_numeric(frame[close_column], errors="coerce").dropna()
             queue.put((not close.empty, {"latest": None if close.empty else close.iloc[-1]}))
-    except Exception as exc:
-        queue.put((False, str(exc)))
+    except Exception as exc:  # noqa: BLE001 - sanitize untrusted provider errors
+        # Proxy errors may contain request details.  Keep credentials and
+        # provider URLs out of the diagnostic output entirely.
+        queue.put((
+            False,
+            "provider request failed"
+            if operation.startswith("proxy_") or patch_active
+            else str(exc),
+        ))
 
 
 def _isolated_call(operation: str, *args, timeout: int = 30):
@@ -239,7 +281,7 @@ def _isolated_call(operation: str, *args, timeout: int = 30):
         return False, f"timeout after {timeout}s"
     try:
         return queue.get(timeout=2)
-    except Exception:
+    except Empty:
         return False, f"worker exited with code {process.exitcode}"
 
 
@@ -267,34 +309,68 @@ def _check_asset(asset_code: str, timeout: int) -> tuple[bool, bool]:
     return history_ok, price_ok
 
 
-def _check_proxy_interfaces(asset_code: str, timeout: int) -> bool:
+def _check_proxy_interfaces(asset_code: str, timeout: int, include_extra: bool = False) -> bool:
+    balance_ok, health = _isolated_call("proxy_health", timeout=timeout)
+    if not balance_ok:
+        detail = (
+            "no positive balance"
+            if isinstance(health, dict)
+            and health.get("state") == "NO_BALANCE_OR_INVALID"
+            else str(health)
+        )
+        _result("Proxy balance", False, detail)
+    else:
+        balance = health.get("balance")
+        state = health.get("state")
+        checked_at = health.get("checked_at")
+        _result(
+            "Proxy balance",
+            state == "POSITIVE" and isinstance(balance, (int, float))
+            and not isinstance(balance, bool) and math.isfinite(balance) and balance > 0,
+            f"state={state} balance={balance} checked_at={checked_at}",
+        )
+    patch_ok = bool(health.get("patch_active")) if isinstance(health, dict) else False
+    _result("Proxy patch", patch_ok, f"active={str(patch_ok).lower()}")
+
     today = _shanghai_today()
     start = (today - timedelta(days=550)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
-    checks = (
-        ("Proxy stock history", "proxy_stock_history", ("000001", start, end)),
-        ("Proxy ETF history", "proxy_etf_history", (asset_code, start, end)),
-        ("Proxy stock info", "proxy_stock_info", ("000001",)),
+    ok, result = _isolated_call(
+        "proxy_etf_history", asset_code, start, end, timeout=timeout
     )
-    all_ok = True
-    for label, operation, args in checks:
-        ok, result = _isolated_call(operation, *args, timeout=timeout)
-        if not ok:
-            _result(label, False, str(result))
-            all_ok = False
-            continue
-        proxy_ok = bool(result.get("proxy_auth_fetched"))
+    if not ok:
+        _result("Proxy ETF history", False, str(result))
+        etf_ok = False
+    else:
+        route_ok = result.get("proxy_route") == "PATCH"
+        etf_ok = route_ok and result.get("adjust") == "qfq" and result.get("rows", 0) > 252
         _result(
-            label,
-            ok and proxy_ok,
-            f"{result}; route={'PATCH' if proxy_ok else 'DIRECT/UNKNOWN'}",
+            "Proxy ETF history",
+            etf_ok,
+            f"rows={result.get('rows', 0)} valid_closes={result.get('valid_close', 0)} "
+            f"adjust={result.get('adjust')} route={'PATCH' if route_ok else 'DIRECT/UNKNOWN'}",
         )
-        all_ok = all_ok and ok and proxy_ok
-    _result(
-        "ETF name endpoint",
-        True,
-        "SKIP: fund_name_em uses .js; patch bypasses it and proxy mode uses code fallback",
-    )
+
+    all_ok = bool(balance_ok and patch_ok and etf_ok)
+    if include_extra:
+        checks = (
+            ("Proxy stock history", "proxy_stock_history", ("000001", start, end)),
+            ("Proxy stock info", "proxy_stock_info", ("000001",)),
+        )
+        for label, operation, args in checks:
+            ok, result = _isolated_call(operation, *args, timeout=timeout)
+            if not ok:
+                _result(label, False, str(result))
+                all_ok = False
+                continue
+            route_ok = result.get("proxy_route") == "PATCH"
+            _result(label, ok and route_ok, f"{result}; route={'PATCH' if route_ok else 'DIRECT/UNKNOWN'}")
+            all_ok = all_ok and ok and route_ok
+        _result(
+            "ETF name endpoint",
+            True,
+            "SKIP: fund_name_em uses .js; patch bypasses it and proxy mode uses code fallback",
+        )
     return all_ok
 
 
@@ -357,9 +433,13 @@ def main() -> int:
         return 0 if proxy_ok else 1
 
     history_ok, price_ok = _check_asset(args.asset_code, args.timeout)
+    from src.config import ENABLE_AKSHARE_PROXY_PATCH
+
     proxy_ok = (
-        _check_proxy_interfaces(args.asset_code, args.timeout)
-        if args.test_proxy_interfaces else True
+        _check_proxy_interfaces(
+            args.asset_code, args.timeout, include_extra=args.test_proxy_interfaces
+        )
+        if ENABLE_AKSHARE_PROXY_PATCH else True
     )
     csi_ok = _check_csi(args.benchmark_code, args.timeout)
     bond_ok = _check_cn10y(args.timeout)

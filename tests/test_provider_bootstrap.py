@@ -1,4 +1,33 @@
+from datetime import UTC, datetime
+
 import pytest
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["NO_BALANCE_OR_INVALID", "UNVERIFIED"],
+)
+def test_enabled_proxy_skips_patch_without_verified_positive_balance(
+    monkeypatch, state
+):
+    from src import provider_bootstrap
+    from src.proxy_health import ProxyBalanceStatus
+
+    monkeypatch.setattr(provider_bootstrap, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    monkeypatch.setattr(provider_bootstrap, "AKSHARE_PROXY_AUTH_IP", "101.201.173.125")
+    monkeypatch.setattr(provider_bootstrap, "AKSHARE_PROXY_AUTH_TOKEN", "secret-token")
+    monkeypatch.setattr(provider_bootstrap, "_installed", False)
+    monkeypatch.setattr(
+        provider_bootstrap.proxy_health,
+        "check_proxy_balance",
+        lambda force: ProxyBalanceStatus(
+            state, 0.0 if state == "NO_BALANCE_OR_INVALID" else None,
+            datetime.now(UTC),
+        ),
+    )
+
+    assert provider_bootstrap.install_data_provider_patch() is False
+    assert provider_bootstrap.proxy_health.proxy_patch_active() is False
 
 
 def test_proxy_patch_is_disabled_by_default(monkeypatch):
@@ -22,6 +51,7 @@ def test_enabled_proxy_patch_requires_credentials(monkeypatch):
 
 def test_enabled_proxy_patch_forwards_documented_options(monkeypatch):
     from src import provider_bootstrap
+    from src.proxy_health import POSITIVE, ProxyBalanceStatus
 
     calls = []
 
@@ -41,6 +71,13 @@ def test_enabled_proxy_patch_forwards_documented_options(monkeypatch):
     )
     monkeypatch.setattr(provider_bootstrap, "_installed", False)
     monkeypatch.setitem(__import__("sys").modules, "akshare_proxy_patch", FakePatch)
+    monkeypatch.setattr(
+        provider_bootstrap.proxy_health,
+        "_fetch_balance",
+        lambda auth_ip, auth_token, checked_at: ProxyBalanceStatus(
+            POSITIVE, 100.0, checked_at
+        ),
+    )
     assert provider_bootstrap.install_data_provider_patch() is True
     assert calls == [
         (

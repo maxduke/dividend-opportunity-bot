@@ -32,6 +32,8 @@
 - `/add_w <user_id>` - 添加用户到白名单。
 - `/del_w <user_id>` - 从白名单移除用户。
 - `/list_w` - 查看白名单列表（会显示简报开启状态）。
+- `/refresh` - 清空历史数据与失败冷却缓存。
+- `/proxy_status [refresh]` - 查看或刷新付费 proxy 健康状态。
 
 ## ⚙️ 配置
 
@@ -67,6 +69,8 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 | `AKSHARE_CALL_TIMEOUT_SECONDS` | 单次 AKShare 阻塞调用的异步等待上限；超时后进入已有 retry/fallback。 | `15` |
 | `AKSHARE_PROXY_CALL_TIMEOUT_SECONDS` | proxy 模式下 EastMoney 调用的等待上限。 | `300` |
 | `HISTORY_FAILURE_COOLDOWN_MINUTES` | 历史数据连续失败后的冷却时间，避免监控循环重复请求。 | `30` |
+| `AKSHARE_PROXY_BALANCE_CACHE_MINUTES` | 付费 proxy 余额检查的内存缓存时间。 | `30` |
+| `AKSHARE_PROXY_LOW_BALANCE_THRESHOLD` | 正数余额预警阈值；`0` 仅在余额非正或无效时告警。 | `0` |
 | `VALUATION_CACHE_HOURS` | 同一 benchmark 的估值缓存时间。 | `12` |
 | `BOND_CACHE_HOURS` | 所有规则共享的中国十年期国债缓存时间。 | `12` |
 | `VALUATION_STALE_MAX_TRADING_DAYS` | 估值日期超过该交易日数后降级为 WATCH。 | `3` |
@@ -99,10 +103,13 @@ Opportunity 监控始终使用前复权（`qfq`）价格。原始价格仅可用
 - 开启时必须设置 `AKSHARE_PROXY_AUTH_TOKEN`；`AKSHARE_PROXY_AUTH_IP` 默认是服务商文档中的 `101.201.173.125`，这里只填写 IP，不要填写端口。token 只放在部署环境，不要提交到仓库。
 - `AKSHARE_PROXY_HOOK_DOMAINS` 只列出需要代理的东方财富域名；新浪、中证、ChinaBond 请求不经过这个补丁。
 - 按服务商官方示例默认 `AKSHARE_PROXY_RETRY=30`，并强制 `fast=False`；重试次数可配置，失败请求的计费规则以服务商当前条款为准。
+- 启动时会先检查余额；只有有限正数余额才安装补丁。余额不足、响应无效或无法验证时，Bot 继续以安全降级模式启动并只通知管理员。补丁未在启动时安装时，后续充值需要重启 Bot；已安装的进程可在余额缓存过期后自动恢复 qfq 请求。
 - proxy 模式下，股票和不复权历史先尝试新浪；前复权 ETF 每日只请求一次 EastMoney。历史失败、估值和国债快照均有缓存，监控循环不会每 60 秒重复调用。
 - `fund_name_em()` 使用 `.js` 资源，而补丁会明确绕过 `.js`/`.html`；proxy 模式不调用它，ETF 名称回退为代码，避免产生未代理请求。
 
 补丁会在主程序导入 AKShare 前安装；补丁包不可用或凭据缺失会让启动失败。它是第三方付费代理服务，不是 AKShare 官方组件。请避免在日志、命令行和仓库中暴露长期 token。
+
+余额查询目前由服务商通过 **HTTP** 提供，并把可重复使用的 token 放在 URL 中。因此网络中间设备、服务商访问日志和反向代理理论上都可能看到 token。仅在信任网络路径并接受该风险时启用；代码和通知不会记录 URL、响应正文或 token。如果服务商以后提供 HTTPS 并支持 header/body 凭据，应立即优先迁移到该方式。
 
 ## 🚀 部署与运行
 
