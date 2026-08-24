@@ -18,6 +18,7 @@ from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -52,6 +53,8 @@ from src.metrics import (
 from src.scoring_config import OPPORTUNITY_LEVELS
 
 HORIZONS = (21, 63, 126, 252)
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+PRICE_ADJUSTMENTS = ("hfq", "qfq")
 COMPONENT_COLUMNS = (
     "dividend_yield_score",
     "spread_score",
@@ -119,6 +122,7 @@ def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
     """Return a sorted ``date``/``close`` frame and reject bad observations."""
     if frame is None or frame.empty:
         return pd.DataFrame(columns=["date", "close"])
+    attrs = dict(getattr(frame, "attrs", {}))
     result = frame.copy()
     close_column = next(
         (name for name in ("收盘", "close", "Close", "adj_close", "adjusted_close") if name in result.columns),
@@ -137,7 +141,9 @@ def _normalise_price_frame(frame: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame({"date": parsed_dates.dt.date, "close": pd.to_numeric(result[close_column], errors="coerce")})
     result = result.dropna(subset=["date", "close"])
     result = result[result["close"] > 0]
-    return result.drop_duplicates("date", keep="last").sort_values("date").reset_index(drop=True)
+    result = result.drop_duplicates("date", keep="last").sort_values("date").reset_index(drop=True)
+    result.attrs.update(attrs)
+    return result
 
 
 def _normalise_valuations(rows: Any) -> list[dict[str, Any]]:
@@ -255,9 +261,9 @@ def replay_scores(
 
     for index, current_row in price_rows.iterrows():
         current_date = current_row["date"]
-        if start and current_date < start:
-            continue
         if end and current_date > end:
+            break
+        if start and current_date < start:
             continue
         # A replay cannot invent a valuation before the first locally persisted row.
         valuation = _latest_on_or_before(valuation_rows, current_date)
@@ -355,6 +361,8 @@ def replay_scores(
         )
 
     result = pd.DataFrame(output)
+    result.attrs["valuation_percentile_min_obs"] = minimum_observations
+    result.attrs["valuation_percentile_min_span_years"] = minimum_span_years
     if result.empty:
         return result
     result = result.sort_values("date").reset_index(drop=True)
@@ -386,28 +394,40 @@ def load_local_history(db_path: str, benchmark: str) -> tuple[list[dict[str, Any
         connection.close()
 
 
-async def _fetch_adjusted_history(asset: str, days: int) -> pd.DataFrame:
+async def _fetch_adjusted_history(asset: str, days: int, price_adjust: str = "hfq") -> pd.DataFrame:
+    if price_adjust not in PRICE_ADJUSTMENTS:
+        raise ValueError(f"unsupported replay price adjustment: {price_adjust}")
     from src.provider_bootstrap import install_data_provider_patch
 
     install_data_provider_patch()
     from src.data_fetcher import get_history_data
 
-    frame = await get_history_data(asset, days)
+    frame = await get_history_data(asset, days, price_adjust=price_adjust)
     if frame is None or frame.empty:
-        raise RuntimeError(f"no adjusted ETF history returned for {asset}")
-    if frame.attrs.get("price_basis") != "qfq":
-        raise RuntimeError("provider did not confirm qfq history; replay aborted")
+        raise RuntimeError(f"no {price_adjust} ETF history returned for {asset}")
+    if frame.attrs.get("price_basis") != price_adjust:
+        raise RuntimeError(
+            f"provider did not confirm {price_adjust} history; replay aborted"
+        )
     return frame
 
 
-def fetch_adjusted_history(asset: str, start: Optional[date], end: Optional[date], earliest_valuation: Optional[date]) -> pd.DataFrame:
-    today = date.today()
+def fetch_adjusted_history(
+    asset: str,
+    start: Optional[date],
+    end: Optional[date],
+    earliest_valuation: Optional[date],
+    price_adjust: str = "hfq",
+) -> pd.DataFrame:
+    today = datetime.now(SHANGHAI_TZ).date()
     requested_start = start or earliest_valuation or (today - timedelta(days=365 * 5))
-    days = max(TECHNICAL_HISTORY_DAYS, (today - requested_start).days + 10)
-    frame = asyncio.run(_fetch_adjusted_history(asset, days))
+    fetch_start = requested_start - timedelta(days=TECHNICAL_HISTORY_DAYS)
+    days = max(TECHNICAL_HISTORY_DAYS, (today - fetch_start).days + 1)
+    frame = asyncio.run(_fetch_adjusted_history(asset, days, price_adjust))
     normalised = _normalise_price_frame(frame)
     if end is not None:
         normalised = normalised[normalised["date"] <= end]
+        normalised.attrs.update(frame.attrs)
     return normalised.reset_index(drop=True)
 
 
@@ -418,10 +438,23 @@ def _parse_cli_date(value: str) -> date:
         raise argparse.ArgumentTypeError("date must be YYYY-MM-DD") from exc
 
 
-def print_report(result: pd.DataFrame) -> None:
+def print_report(result: pd.DataFrame, price_adjust: str = "hfq") -> None:
+    print(f"Replay technical price basis: {price_adjust.upper()}")
+    if price_adjust == "qfq":
+        print("WARNING: qfq historical prices are restated after corporate actions")
     if result.empty:
         print("Available period: none")
         print("Observations: 0")
+        print("\nScoring mode distribution:")
+        for mode in ("PERCENTILE", "MIXED", "ABSOLUTE_FALLBACK", "NONE"):
+            print(f"{mode:<18} {0:>6}")
+        print("WARNING: no mature PERCENTILE observations are available.")
+        print("Do not use this replay to tune V1 weights or thresholds yet.")
+        print(
+            "Available valuation history does not satisfy the configured maturity rules: "
+            f">= {VALUATION_PERCENTILE_MIN_OBS} observations and "
+            f">= {float(getattr(runtime_config, 'VALUATION_PERCENTILE_MIN_SPAN_YEARS', 2.0)):g} years of span."
+        )
         return
     first, last = result["date"].min(), result["date"].max()
     print(f"Available period: {first} → {last}")
@@ -431,6 +464,27 @@ def print_report(result: pd.DataFrame) -> None:
     for _, level, _ in OPPORTUNITY_LEVELS:
         count = int(counts.get(level, 0))
         print(f"{level:<10} {count:>6} {count / len(result) * 100:>6.1f}%")
+
+    print("\nScoring mode distribution:")
+    modes = ("PERCENTILE", "MIXED", "ABSOLUTE_FALLBACK", "NONE")
+    mode_counts = result["scoring_mode"].value_counts()
+    for mode in modes:
+        print(f"{mode:<18} {int(mode_counts.get(mode, 0)):>6}")
+    if not int(mode_counts.get("PERCENTILE", 0)):
+        minimum_observations = result.attrs.get(
+            "valuation_percentile_min_obs", VALUATION_PERCENTILE_MIN_OBS
+        )
+        minimum_span_years = result.attrs.get(
+            "valuation_percentile_min_span_years",
+            float(getattr(runtime_config, "VALUATION_PERCENTILE_MIN_SPAN_YEARS", 2.0)),
+        )
+        print("WARNING: no mature PERCENTILE observations are available.")
+        print("Do not use this replay to tune V1 weights or thresholds yet.")
+        print(
+            "Available valuation/spread history does not satisfy the configured maturity rules: "
+            f">= {minimum_observations} observations and "
+            f">= {minimum_span_years:g} years of span."
+        )
     print("\nScore quantiles:")
     for label, quantile in (("p10", .10), ("p25", .25), ("median", .50), ("p75", .75), ("p90", .90), ("p95", .95)):
         print(f"{label:<7} {result['score'].quantile(quantile):.2f}")
@@ -493,6 +547,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark", required=True, help="CSI benchmark code, e.g. 000922")
     parser.add_argument("--start", type=_parse_cli_date)
     parser.add_argument("--end", type=_parse_cli_date)
+    parser.add_argument(
+        "--price-adjust",
+        choices=PRICE_ADJUSTMENTS,
+        default="hfq",
+        help="historical replay price basis (default: hfq)",
+    )
     parser.add_argument("--db", default=os.getenv("DB_FILE", "rules.db"))
     parser.add_argument("--csv", help="write replay rows to this CSV path")
     return parser
@@ -507,10 +567,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         valuation_rows, bond_rows = load_local_history(args.db, args.benchmark)
         normalised_valuations = _normalise_valuations(valuation_rows)
         if not normalised_valuations:
-            print_report(pd.DataFrame())
+            print_report(pd.DataFrame(), args.price_adjust)
             return 0
         earliest = normalised_valuations[0]["date"]
-        prices = fetch_adjusted_history(args.asset, args.start, args.end, earliest)
+        prices = fetch_adjusted_history(
+            args.asset,
+            args.start,
+            args.end,
+            earliest,
+            args.price_adjust,
+        )
         result = replay_scores(
             prices,
             valuation_rows,
@@ -520,7 +586,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         if args.csv:
             result.to_csv(args.csv, index=False)
-        print_report(result)
+        print_report(result, args.price_adjust)
         return 0
     except (FileNotFoundError, sqlite3.Error, RuntimeError, ValueError) as exc:
         print(f"replay failed: {exc}", file=sys.stderr)

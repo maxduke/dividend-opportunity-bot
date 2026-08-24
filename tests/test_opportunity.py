@@ -3,6 +3,7 @@ import sqlite3
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -191,12 +192,43 @@ def test_unadjusted_etf_fallback_disables_long_term_metrics(monkeypatch):
     assert "Adjusted ETF history unavailable" in snapshot.data_notes[0]
 
 
-def test_missing_realtime_adjustment_factor_marks_qfq_fallback_degraded(monkeypatch):
+def test_future_valuation_date_is_stale_and_cannot_raise_level(monkeypatch):
     history = pd.DataFrame(
         {"收盘": [100.0] * 300},
         index=pd.date_range("2025-01-01", periods=300),
     )
-    history.attrs.update(price_basis="qfq", adjust_factor=None)
+    history.attrs.update(price_basis="qfq", price_basis_asof="2026-08-24")
+    monkeypatch.setattr("src.data_fetcher.is_trading_day", lambda now: True)
+    monkeypatch.setattr("src.opportunity._now", lambda: datetime(2026, 8, 24, 10, tzinfo=ZoneInfo("Asia/Shanghai")))
+    monkeypatch.setattr(
+        "src.opportunity.get_cached_valuation",
+        AsyncMock(return_value={
+            "valuation_date": "2026-08-25",
+            "dividend_yield1": 8.0,
+            "dividend_yield2": 8.0,
+            "pe1": 8.0,
+            "pe2": 8.0,
+        }),
+    )
+    monkeypatch.setattr("src.opportunity.get_cached_cn10y", AsyncMock(return_value=None))
+    monkeypatch.setattr("src.opportunity.get_valuation_history", lambda *args: [])
+    monkeypatch.setattr("src.opportunity.get_bond_history", lambda *args, **kwargs: [])
+
+    snapshot = asyncio.run(
+        evaluate_opportunity(_rule(), SimpleNamespace(bot_data={}), spot_price=90, hist_df=history)
+    )
+
+    assert snapshot.level not in {"MODERATE", "STRONG", "RARE"}
+    assert snapshot.data_quality == "STALE_VALUATION"
+    assert "Valuation date is in the future; freshness invalid" in snapshot.data_notes
+
+
+def test_unconfirmed_qfq_basis_marks_qfq_fallback_degraded(monkeypatch):
+    history = pd.DataFrame(
+        {"收盘": [100.0] * 300},
+        index=pd.date_range("2025-01-01", periods=300),
+    )
+    history.attrs.update(price_basis="qfq", price_basis_asof="2026-08-21")
     monkeypatch.setattr(
         "src.opportunity.get_cached_valuation", AsyncMock(return_value=None)
     )
@@ -208,7 +240,7 @@ def test_missing_realtime_adjustment_factor_marks_qfq_fallback_degraded(monkeypa
 
     assert snapshot.technical_price_basis == "qfq_history_close"
     assert snapshot.data_quality == "DEGRADED"
-    assert any("adjustment factor unavailable" in note.lower() for note in snapshot.data_notes)
+    assert any("basis is not confirmed" in note.lower() for note in snapshot.data_notes)
 
 
 def test_percentile_maturity_requires_observations_and_real_span():

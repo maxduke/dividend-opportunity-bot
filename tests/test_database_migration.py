@@ -1,5 +1,13 @@
 import sqlite3
 
+import pytest
+
+
+def _close_database(database):
+    if database._conn is not None:
+        database._conn.close()
+        database._conn = None
+
 
 def test_legacy_database_migration_is_non_destructive(monkeypatch, tmp_path):
     from src import database
@@ -35,9 +43,7 @@ def test_legacy_database_migration_is_non_destructive(monkeypatch, tmp_path):
     conn.commit()
     conn.close()
 
-    if database._conn is not None:
-        database._conn.close()
-        database._conn = None
+    _close_database(database)
     monkeypatch.setattr(database, "DB_FILE", str(db_file))
     database.db_init()
 
@@ -64,3 +70,38 @@ def test_legacy_database_migration_is_non_destructive(monkeypatch, tmp_path):
         "macro_yield_snapshots",
         "opportunity_snapshots",
     } <= tables
+
+
+def test_db_preflight_creates_missing_parent(monkeypatch, tmp_path):
+    from src import database
+
+    _close_database(database)
+    db_file = tmp_path / "new" / "nested" / "rules.db"
+    monkeypatch.setattr(database, "DB_FILE", str(db_file))
+
+    database.db_init()
+
+    assert db_file.parent.is_dir()
+    assert db_file.is_file()
+    _close_database(database)
+
+
+def test_db_preflight_rejects_unwritable_parent(monkeypatch, tmp_path):
+    from src import database
+
+    _close_database(database)
+    db_file = tmp_path / "data" / "rules.db"
+    db_file.parent.mkdir()
+    monkeypatch.setattr(database, "DB_FILE", str(db_file))
+    monkeypatch.setattr(database.os, "access", lambda path, mode: False)
+
+    with pytest.raises(PermissionError) as error:
+        database.db_init()
+
+    message = str(error.value)
+    assert f"DB_FILE={db_file}" in message
+    assert f"directory={db_file.parent.resolve()}" in message
+    assert f"uid={database.os.getuid()}" in message
+    assert f"gid={database.os.getgid()}" in message
+    assert "10001:10001" in message
+    assert "directory is not writable" in message

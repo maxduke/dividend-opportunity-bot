@@ -60,8 +60,42 @@ def test_adjusted_etf_history_uses_one_eastmoney_call(monkeypatch):
 
     assert result is not None
     assert calls.count("fund_etf_hist_em") == 1
-    # Sina is still used for the free raw-price adjustment-factor lookup.
-    assert calls.count("fund_etf_hist_sina") == 1
+    assert calls.count("fund_etf_hist_sina") == 0
+    assert result.attrs["price_basis"] == "qfq"
+    assert result.attrs["price_basis_asof"] == datetime.now(
+        data_fetcher.SHANGHAI_TZ
+    ).date().isoformat()
+
+
+def test_history_price_adjust_is_forwarded_and_tagged(monkeypatch):
+    from src import data_fetcher
+
+    calls = []
+    history = pd.DataFrame(
+        {
+            "日期": pd.date_range("2025-01-01", periods=300),
+            "收盘": [100.0] * 300,
+        }
+    )
+
+    async def fake_call(function, *args, **kwargs):
+        calls.append((function.__name__, kwargs))
+        return history.copy()
+
+    monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
+
+    result = asyncio.run(data_fetcher.get_history_data("510300", 550, price_adjust="hfq"))
+
+    assert result.attrs["price_basis"] == "hfq"
+    assert calls == [("fund_etf_hist_em", {
+        "symbol": "510300",
+        "period": "daily",
+        "start_date": calls[0][1]["start_date"],
+        "end_date": calls[0][1]["end_date"],
+        "adjust": "hfq",
+        "timeout_seconds": data_fetcher.AKSHARE_PROXY_CALL_TIMEOUT_SECONDS,
+    })]
 
 
 def test_adjusted_etf_sina_fallback_is_marked_unadjusted(monkeypatch):
@@ -85,6 +119,9 @@ def test_adjusted_etf_sina_fallback_is_marked_unadjusted(monkeypatch):
     result = asyncio.run(data_fetcher.get_history_data("510300", 550))
 
     assert result.attrs["price_basis"] == "unadjusted_fallback"
+    assert result.attrs["price_basis_asof"] == datetime.now(
+        data_fetcher.SHANGHAI_TZ
+    ).date().isoformat()
 
 
 def test_failed_history_is_not_retried_during_cooldown(monkeypatch):

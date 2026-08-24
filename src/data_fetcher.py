@@ -4,7 +4,7 @@ import asyncio
 import logging
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
@@ -55,14 +55,15 @@ class IndicatorPriceSeries:
     """Price observations used by technical indicators.
 
     ``closes`` never contains a synthetic non-trading-day observation.  When
-    a quote cannot be put on the adjusted-price scale, the latest confirmed
-    historical close is retained instead.
+    a quote cannot be safely merged, the latest confirmed historical close is
+    retained instead.
     """
 
     closes: pd.Series
     current_price: Optional[float]
     price_date: Optional[date]
     spot_used: bool
+    degraded: bool = False
     note: Optional[str] = None
 
 
@@ -146,12 +147,7 @@ def build_indicator_close_series(
     quote: Optional[RealtimeQuote],
     now: Optional[datetime] = None,
 ) -> IndicatorPriceSeries:
-    """Build an adjusted close series without inventing a daily bar.
-
-    A quote is injected only when its timestamp identifies today's traded
-    session (or, for timestamp-less legacy providers, after 09:30 on a
-    trading day) and its raw-to-qfq factor is known and valid.
-    """
+    """Build a qfq close series without inventing a daily bar."""
     current = now or datetime.now(SHANGHAI_TZ)
     if current.tzinfo is None:
         current = current.replace(tzinfo=SHANGHAI_TZ)
@@ -160,16 +156,25 @@ def build_indicator_close_series(
     today = current.date()
 
     if hist_df is None or hist_df.empty or "收盘" not in hist_df.columns:
-        return IndicatorPriceSeries(pd.Series(dtype=float), None, None, False, "Adjusted history unavailable")
+        return IndicatorPriceSeries(
+            pd.Series(dtype=float), None, None, False, True,
+            "Adjusted history unavailable",
+        )
 
     closes = pd.to_numeric(hist_df["收盘"], errors="coerce").dropna().copy()
     if closes.empty:
-        return IndicatorPriceSeries(pd.Series(dtype=float), None, None, False, "Adjusted history unavailable")
+        return IndicatorPriceSeries(
+            pd.Series(dtype=float), None, None, False, True,
+            "Adjusted history unavailable",
+        )
     try:
         closes.index = pd.to_datetime(closes.index)
         closes = closes.sort_index()
     except (TypeError, ValueError):
-        return IndicatorPriceSeries(pd.Series(dtype=float), None, None, False, "Adjusted history unavailable")
+        return IndicatorPriceSeries(
+            pd.Series(dtype=float), None, None, False, True,
+            "Adjusted history unavailable",
+        )
 
     latest_index = closes.index[-1]
     if getattr(latest_index, "tzinfo", None) is not None:
@@ -188,68 +193,59 @@ def build_indicator_close_series(
     )
 
     basis = hist_df.attrs.get("price_basis")
-    factor = hist_df.attrs.get("adjust_factor")
+    basis_asof = hist_df.attrs.get("price_basis_asof")
     try:
-        factor_value = float(factor)
+        basis_asof = date.fromisoformat(str(basis_asof)[:10])
     except (TypeError, ValueError):
-        factor_value = None
-    factor_valid = factor_value is not None and math.isfinite(factor_value) and factor_value > 0
-    adjusted_history = basis == "qfq"
-    if not adjusted_history:
-        note = (
-            "Adjusted ETF history unavailable; technical price basis is unavailable"
-            if basis == "unadjusted_fallback"
-            else "Adjusted history unavailable; technical price basis is unavailable"
+        basis_asof = None
+    current_qfq = basis == "qfq" and (basis_asof == today or latest_date == today)
+    if not current_qfq:
+        if basis != "qfq":
+            note = (
+                "Adjusted ETF history unavailable; technical price basis is unavailable"
+                if basis == "unadjusted_fallback"
+                else "Adjusted history unavailable; technical price basis is unavailable"
+            )
+        else:
+            note = (
+                "QFQ history basis is not confirmed for the current Shanghai date; "
+                "using latest confirmed qfq close"
+            )
+        return IndicatorPriceSeries(
+            closes,
+            latest_price,
+            latest_date,
+            False,
+            True,
+            note,
         )
-        return IndicatorPriceSeries(closes, latest_price, latest_date, False, note)
 
     if quote_obj is not None and quote_is_today:
-        if factor_valid:
-            adjusted_price = quote_obj.price * factor_value
-            if math.isfinite(adjusted_price) and adjusted_price > 0:
-                if latest_date == today:
-                    closes.iloc[-1] = adjusted_price
-                else:
-                    closes.loc[pd.Timestamp(today)] = adjusted_price
-                    closes = closes.sort_index()
-                return IndicatorPriceSeries(closes, adjusted_price, today, True, None)
-        return IndicatorPriceSeries(
-            closes,
-            latest_price,
-            latest_date,
-            False,
-            "Realtime adjustment factor unavailable; using the latest confirmed adjusted close",
-        )
-
-    if quote_obj is not None and quote_obj.timestamp is None and trading_today and current.time() >= time(9, 30):
-        if factor_valid:
-            adjusted_price = quote_obj.price * factor_value
-            if math.isfinite(adjusted_price) and adjusted_price > 0:
-                if latest_date == today:
-                    closes.iloc[-1] = adjusted_price
-                else:
-                    closes.loc[pd.Timestamp(today)] = adjusted_price
-                    closes = closes.sort_index()
-                return IndicatorPriceSeries(closes, adjusted_price, today, True, None)
-        return IndicatorPriceSeries(
-            closes,
-            latest_price,
-            latest_date,
-            False,
-            "Realtime adjustment factor unavailable; using the latest confirmed adjusted close",
-        )
-
-    if latest_date == today:
-        return IndicatorPriceSeries(closes, latest_price, latest_date, False, None)
+        if latest_date == today:
+            closes.iloc[-1] = quote_obj.price
+        else:
+            closes.loc[pd.Timestamp(today)] = quote_obj.price
+            closes = closes.sort_index()
+        return IndicatorPriceSeries(closes, quote_obj.price, today, True, False, None)
 
     note = None
+    degraded = False
     if quote_obj is not None and quote_time is not None and quote_time.date() != today:
         note = "Realtime quote belongs to a previous session; using the latest confirmed adjusted close"
+        degraded = True
     elif quote_obj is not None and not trading_today:
         note = "Today is not a trading session; using the latest confirmed adjusted close"
-    elif quote_obj is not None and current.time() < time(9, 30):
-        note = "Market has not opened; using the latest confirmed adjusted close"
-    return IndicatorPriceSeries(closes, latest_price, latest_date, False, note)
+        degraded = True
+    elif quote_obj is None:
+        note = "Realtime quote unavailable; using the latest confirmed qfq close"
+        degraded = True
+    elif quote_time is None:
+        note = "Realtime quote timestamp unavailable; using the latest confirmed qfq close"
+        degraded = True
+    elif quote_time > current:
+        note = "Realtime quote timestamp is in the future; using the latest confirmed qfq close"
+        degraded = True
+    return IndicatorPriceSeries(closes, latest_price, latest_date, False, degraded, note)
 
 
 # --- 重试逻辑（改进5: 指数退避） ---
@@ -402,13 +398,19 @@ async def get_asset_name_with_cache(asset_code: str, context: ContextTypes.DEFAU
 
 # --- 历史数据获取 ---
 
-async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, None]:
-    """获取单个资产的历史日线数据，并在需要时计算复权因子。"""
+async def get_history_data(
+    asset_code: str,
+    days: int,
+    price_adjust: str = PRICE_ADJUSTMENT,
+) -> Union[pd.DataFrame, None]:
+    """获取单个资产的历史日线数据。"""
+    if price_adjust not in {"qfq", "hfq"}:
+        raise ValueError("price_adjust must be 'qfq' or 'hfq'")
     try:
-        today = datetime.now()
+        today = datetime.now(SHANGHAI_TZ)
         start_date = (today - timedelta(days=days)).strftime('%Y%m%d')
         end_date = today.strftime('%Y%m%d')
-        adjust = PRICE_ADJUSTMENT
+        adjust = price_adjust
 
         async def fetch_hist_em():
             try:
@@ -507,11 +509,11 @@ async def get_history_data(asset_code: str, days: int) -> Union[pd.DataFrame, No
         df.attrs["technical_history_days"] = days
         if source == "sina" and asset_code.startswith(ETF_PREFIXES):
             logger.info(f"ETF({asset_code}) 使用新浪历史数据，仅能提供不复权数据。")
-            df.attrs["adjust_factor"] = None
             df.attrs["price_basis"] = "unadjusted_fallback"
+            df.attrs["price_basis_asof"] = datetime.now(SHANGHAI_TZ).date().isoformat()
         else:
-            df.attrs['adjust_factor'] = await _get_adjust_factor(asset_code, df)
-            df.attrs["price_basis"] = "qfq"
+            df.attrs["price_basis"] = price_adjust
+            df.attrs["price_basis_asof"] = datetime.now(SHANGHAI_TZ).date().isoformat()
         return df
     except Exception as e:
         logger.error(f"获取 {asset_code} 历史数据失败: {e}")
@@ -547,129 +549,6 @@ async def get_history_data_cached(
         # monitoring tick while MA200/52W data is still unavailable.
         failures[asset_code] = current
     return fetched
-
-
-async def _get_adjust_factor(asset_code: str, hist_df: pd.DataFrame) -> Optional[float]:
-    """
-    计算复权因子（复权收盘 / 未复权收盘），用于将实时价格转换到复权尺度。
-    若无法可靠计算，则返回 ``None``，避免把原始价格混入复权序列。
-    """
-    try:
-        if hist_df is None or hist_df.empty or "收盘" not in hist_df.columns:
-            return None
-        base_date = pd.Timestamp(hist_df.index[-1])
-        today_date = datetime.now(SHANGHAI_TZ).date()
-        if base_date.date() >= today_date and len(hist_df.index) > 1:
-            base_date = pd.Timestamp(hist_df.index[-2])
-        raw_start = (base_date - timedelta(days=30)).strftime('%Y%m%d')
-        raw_end = (base_date + timedelta(days=1)).strftime('%Y%m%d')
-
-        async def fetch_raw_hist_em():
-            try:
-                if asset_code.startswith(STOCK_PREFIXES):
-                    return await _call_akshare(
-                        ak.stock_zh_a_hist,
-                        symbol=asset_code,
-                        period="daily",
-                        start_date=raw_start,
-                        end_date=raw_end,
-                        adjust="",
-                        timeout_seconds=(
-                            AKSHARE_PROXY_CALL_TIMEOUT_SECONDS
-                            if ENABLE_AKSHARE_PROXY_PATCH else None
-                        ),
-                    )
-                if asset_code.startswith(ETF_PREFIXES):
-                    return await _call_akshare(
-                        ak.fund_etf_hist_em,
-                        symbol=asset_code,
-                        period="daily",
-                        start_date=raw_start,
-                        end_date=raw_end,
-                        adjust="",
-                        timeout_seconds=(
-                            AKSHARE_PROXY_CALL_TIMEOUT_SECONDS
-                            if ENABLE_AKSHARE_PROXY_PATCH else None
-                        ),
-                    )
-            except Exception as e:
-                logger.warning(f"东方财富接口获取未复权数据失败({asset_code}): {e}")
-            return None
-
-        async def fetch_raw_hist_sina():
-            try:
-                if asset_code.startswith(STOCK_PREFIXES):
-                    sina_symbol = get_sina_symbol(asset_code)
-                    return await _call_akshare(
-                        ak.stock_zh_a_daily,
-                        symbol=sina_symbol,
-                        start_date=raw_start,
-                        end_date=raw_end,
-                        adjust="",
-                    )
-                if asset_code.startswith(ETF_PREFIXES):
-                    sina_symbol = get_sina_symbol(asset_code)
-                    return await _call_akshare(
-                        ak.fund_etf_hist_sina,
-                        symbol=sina_symbol,
-                    )
-            except Exception as e:
-                logger.warning(f"新浪接口获取未复权数据失败({asset_code}): {e}")
-            return None
-
-        raw_df = None
-        sina_attempted = False
-
-        prefer_sina_for_etf_raw = asset_code.startswith(ETF_PREFIXES)
-        if ENABLE_AKSHARE_PROXY_PATCH or prefer_sina_for_etf_raw:
-            sina_attempted = True
-            raw_df = await _run_with_retries(fetch_raw_hist_sina, f"获取未复权数据-新浪({asset_code})")
-
-        if raw_df is None or raw_df.empty:
-            raw_df = await _run_with_retries(
-                fetch_raw_hist_em,
-                f"获取未复权数据({asset_code})",
-                attempts=_em_retry_attempts(),
-            )
-
-        if (raw_df is None or raw_df.empty) and not sina_attempted:
-            logger.info(f"尝试使用新浪接口获取未复权数据({asset_code})。")
-            raw_df = await _run_with_retries(fetch_raw_hist_sina, f"获取未复权数据-新浪({asset_code})")
-        if raw_df is None or raw_df.empty:
-            return None
-        raw_df = normalize_hist_df(raw_df)
-        if raw_df is None or raw_df.empty or "日期" not in raw_df.columns:
-            return None
-        raw_df.set_index('日期', inplace=True)
-
-        base_ts = pd.Timestamp(base_date)
-        raw_idx = pd.to_datetime(raw_df.index)
-        adj_idx = pd.to_datetime(hist_df.index)
-        common_dates = raw_idx.intersection(adj_idx)
-        candidate_dates = common_dates[common_dates <= base_ts]
-        if candidate_dates.empty:
-            return None
-        aligned_date = candidate_dates.max()
-
-        raw_close = raw_df.loc[aligned_date, '收盘']
-        adjusted_close = hist_df.loc[aligned_date, '收盘']
-        if isinstance(raw_close, pd.Series):
-            raw_close = raw_close.iloc[-1]
-        if isinstance(adjusted_close, pd.Series):
-            adjusted_close = adjusted_close.iloc[-1]
-        if pd.isna(raw_close) or pd.isna(adjusted_close):
-            return None
-        raw_value = float(raw_close)
-        adjusted_value = float(adjusted_close)
-        if not math.isfinite(raw_value) or not math.isfinite(adjusted_value):
-            return None
-        if raw_value <= 0 or adjusted_value <= 0:
-            return None
-        factor = adjusted_value / raw_value
-        return factor if math.isfinite(factor) and factor > 0 else None
-    except Exception as e:
-        logger.warning(f"计算复权因子失败({asset_code}): {e}")
-        return None
 
 
 # --- 实时价格获取 ---

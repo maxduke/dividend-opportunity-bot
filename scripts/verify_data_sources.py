@@ -2,11 +2,13 @@
 """Live AKShare smoke test; never imported by the normal CI test suite."""
 
 import argparse
+import math
 import multiprocessing as mp
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -15,6 +17,70 @@ sys.path.insert(0, str(ROOT))
 
 
 REQUIRED_CSI_COLUMNS = ("日期", "指数代码", "股息率1", "股息率2", "市盈率1", "市盈率2")
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _shanghai_today() -> date:
+    return datetime.now(SHANGHAI_TZ).date()
+
+
+def _parse_shanghai_timestamp(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str) and len(value.strip()) <= 8 and ":" in value:
+        return None
+    try:
+        parsed = pd.Timestamp(value).to_pydatetime()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if pd.isna(parsed):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=SHANGHAI_TZ)
+    return parsed.astimezone(SHANGHAI_TZ)
+
+
+def _validate_realtime_quote(quote, now: datetime | None = None):
+    """Validate the provider quote required by runtime spot merging."""
+    if quote is None:
+        return False, {"reason": "quote missing"}
+    try:
+        price = float(quote.price)
+    except (AttributeError, TypeError, ValueError):
+        return False, {"reason": "price invalid", "price": getattr(quote, "price", None)}
+    timestamp = _parse_shanghai_timestamp(getattr(quote, "timestamp", None))
+    detail = {
+        "price": price,
+        "timestamp": timestamp.isoformat() if timestamp is not None else getattr(quote, "timestamp", None),
+    }
+    if not math.isfinite(price) or price <= 0:
+        detail["reason"] = "price must be finite and > 0"
+        return False, detail
+    if timestamp is None:
+        detail["reason"] = "timestamp missing or unparseable"
+        return False, detail
+    current = now or datetime.now(SHANGHAI_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=SHANGHAI_TZ)
+    else:
+        current = current.astimezone(SHANGHAI_TZ)
+    if timestamp > current:
+        detail["reason"] = "timestamp is in the future"
+        return False, detail
+    return True, detail
+
+
+def _latest_history_date(frame):
+    if frame is None or frame.empty:
+        return None
+    values = frame.index
+    for column in ("日期", "date", "datetime"):
+        if column in frame.columns:
+            values = frame[column]
+            break
+    parsed = pd.to_datetime(values, errors="coerce")
+    valid = parsed.dropna()
+    return None if valid.empty else str(valid.max().date())
 
 
 def _result(name: str, ok: bool, detail: str = "") -> bool:
@@ -75,10 +141,10 @@ def _isolated_worker(queue, operation: str, args: tuple):
                     period="daily",
                     start_date=args[1],
                     end_date=args[2],
-                    adjust="",
+                    adjust="qfq",
                 )
                 valid = int(pd.to_numeric(frame.get("收盘"), errors="coerce").notna().sum())
-                result = {"rows": len(frame), "valid_close": valid}
+                result = {"rows": len(frame), "valid_close": valid, "adjust": "qfq"}
                 ok = len(frame) > 252 and valid > 252
             elif operation == "proxy_stock_info":
                 frame = ak.stock_individual_info_em(symbol=args[0])
@@ -101,14 +167,21 @@ def _isolated_worker(queue, operation: str, args: tuple):
 
             frame = asyncio.run(get_history_data(args[0], 550))
             valid = 0 if frame is None else int(pd.to_numeric(frame.get("收盘"), errors="coerce").notna().sum())
-            queue.put((True, {"rows": 0 if frame is None else len(frame), "valid": valid}))
+            queue.put((True, {
+                "rows": 0 if frame is None else len(frame),
+                "valid": valid,
+                "price_basis": None if frame is None else frame.attrs.get("price_basis"),
+                "price_basis_asof": None if frame is None else frame.attrs.get("price_basis_asof"),
+                "latest_history_date": _latest_history_date(frame),
+            }))
         elif operation == "price":
             import asyncio
 
-            from src.data_fetcher import _fetch_single_realtime_price
+            from src.data_fetcher import _fetch_single_realtime_quote
 
-            price = asyncio.run(_fetch_single_realtime_price(args[0]))
-            queue.put((price is not None and float(price) > 0, price))
+            quote = asyncio.run(_fetch_single_realtime_quote(args[0]))
+            ok, detail = _validate_realtime_quote(quote)
+            queue.put((ok, detail))
         elif operation == "csi":
             frame = ak.stock_zh_index_value_csindex(symbol=args[0])
             missing = [column for column in REQUIRED_CSI_COLUMNS if column not in frame.columns]
@@ -174,18 +247,28 @@ def _check_asset(asset_code: str, timeout: int) -> tuple[bool, bool]:
     history_ok, history = _isolated_call("history", asset_code, timeout=timeout)
     close_count = int(history.get("valid", 0)) if history_ok else 0
     rows = int(history.get("rows", 0)) if history_ok else 0
-    history_ok = history_ok and rows > 252
-    latest_ok = history_ok and close_count > 252
-    _result("ETF history", history_ok, f"rows={rows}")
-    _result("Valid close", latest_ok, f"valid_close={close_count}")
+    basis = history.get("price_basis") if history_ok else None
+    basis_asof = history.get("price_basis_asof") if history_ok else None
+    latest_date = history.get("latest_history_date") if history_ok else None
+    history_ok = history_ok and rows > 252 and close_count > 252 and basis == "qfq"
+    _result(
+        "ETF qfq history",
+        history_ok,
+        f"rows={rows} valid_closes={close_count} price_basis={basis} "
+        f"price_basis_asof={basis_asof} latest_history_date={latest_date}",
+    )
 
-    price_ok, price = _isolated_call("price", asset_code, timeout=timeout)
-    _result("Realtime price", price_ok, f"price={price}" if price_ok else str(price))
-    return history_ok and latest_ok, price_ok
+    price_ok, quote = _isolated_call("price", asset_code, timeout=timeout)
+    detail = (
+        f"price={quote['price']} timestamp={quote['timestamp']}"
+        if price_ok else str(quote)
+    )
+    _result("Sina realtime", price_ok, detail)
+    return history_ok, price_ok
 
 
 def _check_proxy_interfaces(asset_code: str, timeout: int) -> bool:
-    today = date.today()
+    today = _shanghai_today()
     start = (today - timedelta(days=550)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
     checks = (
@@ -237,8 +320,8 @@ def _check_csi(benchmark_code: str, timeout: int) -> bool:
 
 
 def _check_cn10y(timeout: int) -> bool:
-    start = date.today() - timedelta(days=30)
-    end = date.today()
+    end = _shanghai_today()
+    start = end - timedelta(days=30)
     ok, summary = _isolated_call(
         "bond", start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), timeout=timeout
     )

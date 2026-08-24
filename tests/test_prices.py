@@ -15,10 +15,10 @@ from src.opportunity import _parse_datetime
 TZ = ZoneInfo("Asia/Shanghai")
 
 
-def _history(dates, closes, *, basis="qfq", factor=1.0):
+def _history(dates, closes, *, basis="qfq", asof="2026-08-24"):
     frame = pd.DataFrame({"收盘": closes}, index=pd.to_datetime(dates))
     frame.attrs["price_basis"] = basis
-    frame.attrs["adjust_factor"] = factor
+    frame.attrs["price_basis_asof"] = asof
     return frame
 
 
@@ -81,7 +81,7 @@ def test_monday_preopen_does_not_create_bar_from_stale_quote(monkeypatch):
     _trading_day(monkeypatch)
     result = data_fetcher.build_indicator_close_series(
         _history(["2026-08-21"], [100]),
-        data_fetcher.RealtimeQuote(101, None),
+        data_fetcher.RealtimeQuote(101, datetime(2026, 8, 21, 15, tzinfo=TZ)),
         datetime(2026, 8, 24, 8, 30, tzinfo=TZ),
     )
     assert len(result.closes) == 1
@@ -122,27 +122,59 @@ def test_stale_previous_day_quote_is_not_treated_as_today(monkeypatch):
     assert not result.spot_used
 
 
-def test_timestamp_less_quote_is_allowed_after_market_open(monkeypatch):
+def test_timestamp_less_quote_is_rejected_after_market_open(monkeypatch):
     _trading_day(monkeypatch)
     result = data_fetcher.build_indicator_close_series(
         _history(["2026-08-21"], [100]),
         data_fetcher.RealtimeQuote(101, None),
         datetime(2026, 8, 24, 9, 30, tzinfo=TZ),
     )
-    assert result.spot_used
-    assert result.closes.iloc[-1] == 101
+    assert not result.spot_used
+    assert result.closes.iloc[-1] == 100
+    assert result.degraded
 
 
-def test_missing_adjustment_factor_keeps_confirmed_qfq_close(monkeypatch):
+def test_stale_qfq_basis_keeps_confirmed_qfq_close(monkeypatch):
     _trading_day(monkeypatch)
     result = data_fetcher.build_indicator_close_series(
-        _history(["2026-08-21"], [100], factor=None),
+        _history(["2026-08-21"], [100], asof="2026-08-21"),
         data_fetcher.RealtimeQuote(101, datetime(2026, 8, 24, 10, tzinfo=TZ)),
         datetime(2026, 8, 24, 10, tzinfo=TZ),
     )
     assert list(result.closes) == [100]
     assert not result.spot_used
-    assert "adjustment factor unavailable" in result.note
+    assert result.degraded
+    assert "basis is not confirmed" in result.note
+
+
+def test_today_history_row_confirms_qfq_basis_when_asof_is_missing(monkeypatch):
+    _trading_day(monkeypatch)
+    history = _history(["2026-08-24"], [99], asof=None)
+    result = data_fetcher.build_indicator_close_series(
+        history,
+        data_fetcher.RealtimeQuote(100, datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        datetime(2026, 8, 24, 10, 1, tzinfo=TZ),
+    )
+    assert result.spot_used
+    assert list(result.closes) == [100]
+
+
+def test_current_raw_quote_is_not_multiplied_by_historical_ratio(monkeypatch):
+    _trading_day(monkeypatch)
+    history = _history(["2026-08-21", "2026-08-24"], [95, 100])
+    history.attrs["adjust_factor"] = 0.95
+    result = data_fetcher.build_indicator_close_series(
+        history,
+        data_fetcher.RealtimeQuote(100, datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        datetime(2026, 8, 24, 10, 1, tzinfo=TZ),
+    )
+    assert result.spot_used
+    assert result.current_price == 100
+    assert result.closes.iloc[-1] == 100
+
+
+def test_adjustment_factor_helper_was_removed():
+    assert not hasattr(data_fetcher, "_get_adjust_factor")
 
 
 def test_unadjusted_fallback_disables_all_technical_scores(monkeypatch):

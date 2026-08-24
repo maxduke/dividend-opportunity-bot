@@ -20,9 +20,9 @@ RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 # 确保最终镜像和构建镜像使用相同的基础
 FROM python:3.12-slim-bookworm
 
-# 创建非 root 用户
-RUN groupadd -r appuser && \
-    useradd -r -s /bin/false -g appuser appuser
+# 创建固定 UID/GID 的非 root 用户，便于 bind mount 在宿主机上预先授权
+RUN groupadd --gid 10001 appuser && \
+    useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin appuser
 
 WORKDIR /app
 

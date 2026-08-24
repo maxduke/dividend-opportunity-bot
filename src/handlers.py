@@ -7,6 +7,7 @@ import logging
 import sqlite3
 from datetime import datetime
 from functools import wraps
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -34,6 +35,7 @@ from .opportunity import (
 from .valuation_fetcher import backfill_cn10y, get_cached_valuation
 
 logger = logging.getLogger(__name__)
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def whitelisted_only(func):
@@ -169,7 +171,7 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
         await backfill_cn10y()
         asset_name = await get_asset_name_with_cache(asset_code, context)
         benchmark_name = str(valuation["benchmark_name"] or benchmark_code)
-        now = datetime.now().isoformat()
+        now = datetime.now(SHANGHAI_TZ).isoformat()
         try:
             db_execute(
                 """
@@ -344,13 +346,13 @@ async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.
                 updated_at = ?
             WHERE id = ? AND user_id = ?
             """,
-            (datetime.now().isoformat(), rule_id, update.effective_user.id),
+            (datetime.now(SHANGHAI_TZ).isoformat(), rule_id, update.effective_user.id),
             swallow_errors=False,
         )
     else:
         db_execute(
             "UPDATE opportunity_rules SET is_active = 0, updated_at = ? WHERE id = ? AND user_id = ?",
-            (datetime.now().isoformat(), rule_id, update.effective_user.id),
+            (datetime.now(SHANGHAI_TZ).isoformat(), rule_id, update.effective_user.id),
             swallow_errors=False,
         )
     await update.message.reply_text(f"✅ Opportunity Rule ID: {rule_id} 已{'开启' if active else '关闭'}。")

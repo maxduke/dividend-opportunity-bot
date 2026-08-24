@@ -247,6 +247,8 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
             message += (
                 f"{snapshot.level} <b>{html.escape(snapshot.asset_name)}</b> ({snapshot.asset_code})\n"
                 f"  Score: <b>{snapshot.total_score:.0f}</b> | Level: {snapshot.level}\n"
+                f"  Mode: <code>{html.escape(snapshot.scoring_mode)}</code> | Data: <code>{html.escape(snapshot.data_quality)}</code>\n"
+                f"  As of: Price {html.escape(snapshot.technical_price_date or 'N/A')} | Valuation {html.escape(snapshot.valuation_date or 'N/A')}\n"
                 f"  DY: {dy}\n"
                 f"  DY-CN10Y: {spread}\n"
                 f"  MA200 deviation: {ma}\n"
