@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import akshare as ak
@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 _LOCAL_HOLIDAYS = CHINA_CALENDAR.adhoc_holidays
 LOCAL_CALENDAR_COVERAGE_START = _LOCAL_HOLIDAYS.min().date()
 LOCAL_CALENDAR_COVERAGE_END = _LOCAL_HOLIDAYS.max().date()
-_trade_day_cache = {"days": None, "loaded_on": None}
+CALENDAR_FAILURE_RETRY = timedelta(minutes=1)
+_trade_day_cache = {"days": None, "loaded_on": None, "failed_at": None}
 
 
 def _load_trade_days_from_ak() -> set | None:
@@ -39,12 +40,17 @@ def is_trading_day(check_date: datetime) -> bool:
     if LOCAL_CALENDAR_COVERAGE_START <= cn_date <= LOCAL_CALENDAR_COVERAGE_END:
         return not CHINA_CALENDAR.valid_days(start_date=cn_date, end_date=cn_date).empty
 
-    today = datetime.now(SHANGHAI_TZ).date()
-    if _trade_day_cache["loaded_on"] != today:
-        _trade_day_cache["loaded_on"] = today
+    now = datetime.now(SHANGHAI_TZ)
+    failed_at = _trade_day_cache.get("failed_at")
+    retry_due = failed_at is None or now - failed_at >= CALENDAR_FAILURE_RETRY
+    if _trade_day_cache.get("loaded_on") != now.date() and retry_due:
         trade_days = _load_trade_days_from_ak()
-        if trade_days is not None:
+        if trade_days is None:
+            _trade_day_cache["failed_at"] = now
+        else:
             _trade_day_cache["days"] = trade_days
+            _trade_day_cache["loaded_on"] = now.date()
+            _trade_day_cache["failed_at"] = None
 
     trade_days = _trade_day_cache["days"]
     return isinstance(trade_days, set) and cn_date in trade_days

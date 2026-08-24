@@ -342,36 +342,47 @@ async def get_cached_cn10y(bot_data: dict):
 
 
 async def backfill_cn10y() -> int:
-    end_date = _now().date()
-    earliest = db_execute(
-        "SELECT MIN(valuation_date) AS valuation_date FROM benchmark_valuation_snapshots",
-        fetchone=True,
+    missing_rows = (
+        db_execute(
+            """
+            SELECT DISTINCT v.valuation_date
+            FROM benchmark_valuation_snapshots v
+            WHERE NOT EXISTS (
+                SELECT 1 FROM macro_yield_snapshots b
+                WHERE b.yield_date BETWEEN date(v.valuation_date, '-7 days')
+                                       AND v.valuation_date
+            )
+            ORDER BY v.valuation_date
+            """,
+            fetchall=True,
+        )
+        or []
     )
-    start_date = (
-        date.fromisoformat(earliest["valuation_date"]) - timedelta(days=7)
-        if earliest and earliest["valuation_date"]
-        else end_date - timedelta(days=30)
-    )
-    earliest_bond = db_execute(
-        "SELECT MIN(yield_date) AS yield_date FROM macro_yield_snapshots",
-        fetchone=True,
-    )
-    if earliest_bond and earliest_bond["yield_date"]:
-        existing_start = date.fromisoformat(earliest_bond["yield_date"])
-        if existing_start <= start_date:
-            return 0
-        end_date = min(end_date, existing_start - timedelta(days=1))
-    total = 0
-    cursor = start_date
-    while cursor <= end_date:
-        chunk_end = min(cursor + timedelta(days=349), end_date)
-        frame = await _fetch_primary_bond(cursor, chunk_end)
-        if frame is None:
-            logger.warning("[BOND] 回填区间失败，继续下一个区间: %s至%s", cursor, chunk_end)
+    ranges = []
+    for row in missing_rows:
+        missing_date = date.fromisoformat(row["valuation_date"])
+        window_start = missing_date - timedelta(days=7)
+        if ranges and window_start <= ranges[-1][1] + timedelta(days=1):
+            ranges[-1] = (ranges[-1][0], missing_date)
         else:
-            total += persist_bond_rows(frame, "chinabond")
-        cursor = chunk_end + timedelta(days=1)
-        if cursor <= end_date and REQUEST_INTERVAL_SECONDS > 0:
-            await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
+            ranges.append((window_start, missing_date))
+
+    total = 0
+    request_count = 0
+    for range_start, range_end in ranges:
+        cursor = range_start
+        while cursor <= range_end:
+            chunk_end = min(cursor + timedelta(days=349), range_end)
+            if request_count and REQUEST_INTERVAL_SECONDS > 0:
+                await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
+            frame = await _fetch_primary_bond(cursor, chunk_end)
+            request_count += 1
+            if frame is None:
+                logger.warning(
+                    "[BOND] 回填区间失败，继续下一个区间: %s至%s", cursor, chunk_end
+                )
+            else:
+                total += persist_bond_rows(frame, "chinabond")
+            cursor = chunk_end + timedelta(days=1)
     logger.info("[BOND] 历史回填完成，有效记录 %s 条", total)
     return total
