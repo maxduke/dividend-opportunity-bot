@@ -36,6 +36,12 @@ from .config import (
     TECHNICAL_HISTORY_DAYS,
 )
 from .market import is_trading_day
+from .proxy_health import (
+    POSITIVE,
+    check_proxy_balance_async,
+    notify_proxy_health,
+    proxy_patch_active,
+)
 from .utils import get_sina_symbol, normalize_hist_df
 
 logger = logging.getLogger(__name__)
@@ -311,11 +317,26 @@ def history_is_sufficient(frame, days: int) -> bool:
     return _valid_close_count(frame) >= minimum
 
 
-def _cached_history_is_usable(frame, days: int) -> bool:
+def runtime_history_is_usable(frame, days: int, now=None) -> bool:
+    """Return whether a frame is current qfq history suitable for runtime scoring."""
+    if frame is None or getattr(frame, "empty", True):
+        return False
+    current = now or datetime.now(SHANGHAI_TZ)
+    if isinstance(current, datetime):
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=SHANGHAI_TZ)
+        current_date = current.astimezone(SHANGHAI_TZ).date()
+    else:
+        current_date = current
+    try:
+        basis_asof = date.fromisoformat(str(frame.attrs.get("price_basis_asof"))[:10])
+    except (TypeError, ValueError):
+        return False
     return (
-        frame is not None
-        and frame.attrs.get("technical_history_days", 0) >= days
+        frame.attrs.get("technical_history_days", 0) >= days
         and history_is_sufficient(frame, days)
+        and frame.attrs.get("price_basis") == PRICE_ADJUSTMENT == "qfq"
+        and basis_asof == current_date
     )
 
 
@@ -362,6 +383,17 @@ async def get_asset_name_with_cache(asset_code: str, context: ContextTypes.DEFAU
 
     async def fetch_name():
         if asset_code.startswith(STOCK_PREFIXES):
+            if ENABLE_AKSHARE_PROXY_PATCH:
+                if not proxy_patch_active():
+                    logger.info("proxy 未激活，跳过股票名称 EastMoney 请求")
+                    return None
+                balance_status = await check_proxy_balance_async()
+                if balance_status.state != POSITIVE:
+                    logger.info(
+                        "proxy 不可用，跳过股票名称 EastMoney 请求 balance_status=%s",
+                        balance_status.state,
+                    )
+                    return None
             info_df = await _call_akshare(
                 ak.stock_individual_info_em,
                 symbol=asset_code,
@@ -418,6 +450,15 @@ async def get_history_data(
 
         async def fetch_hist_em():
             try:
+                if ENABLE_AKSHARE_PROXY_PATCH:
+                    balance_status = await check_proxy_balance_async()
+                    if not proxy_patch_active() or balance_status.state != POSITIVE:
+                        logger.warning(
+                            "[AKSHARE] paid history skipped balance_status=%s patch_active=%s",
+                            balance_status.state,
+                            proxy_patch_active(),
+                        )
+                        return None
                 if asset_code.startswith(STOCK_PREFIXES):
                     return await _call_akshare(
                         ak.stock_zh_a_hist,
@@ -444,8 +485,15 @@ async def get_history_data(
                             if ENABLE_AKSHARE_PROXY_PATCH else None
                         ),
                     )
-            except Exception as e:
-                logger.warning(f"东方财富接口获取历史数据失败({asset_code}): {e}")
+            except Exception as exc:
+                if ENABLE_AKSHARE_PROXY_PATCH:
+                    logger.warning(
+                        "东方财富接口获取历史数据失败(%s) error_type=%s",
+                        asset_code,
+                        type(exc).__name__,
+                    )
+                else:
+                    logger.warning("东方财富接口获取历史数据失败(%s): %s", asset_code, exc)
             return None
 
         async def fetch_hist_sina():
@@ -519,8 +567,15 @@ async def get_history_data(
             df.attrs["price_basis"] = price_adjust
             df.attrs["price_basis_asof"] = datetime.now(SHANGHAI_TZ).date().isoformat()
         return df
-    except Exception as e:
-        logger.error(f"获取 {asset_code} 历史数据失败: {e}")
+    except Exception as exc:
+        if ENABLE_AKSHARE_PROXY_PATCH:
+            logger.error(
+                "获取 %s 历史数据失败 error_type=%s",
+                asset_code,
+                type(exc).__name__,
+            )
+        else:
+            logger.error("获取 %s 历史数据失败: %s", asset_code, exc)
         return None
 
 
@@ -534,23 +589,26 @@ async def get_history_data_cached(
     current = now or datetime.now(SHANGHAI_TZ)
     cache = ensure_daily_history_cache(context, current)
     cached = cache.get(asset_code)
-    if _cached_history_is_usable(cached, days):
+    if runtime_history_is_usable(cached, days, current):
         return cached
     if history_failure_is_fresh(context, asset_code, current):
         return cached
 
     fetched = await get_history_data(asset_code, days)
+    bot = getattr(context, "bot", None)
+    if bot is not None:
+        await notify_proxy_health(bot)
     failures = context.bot_data.setdefault(KEY_HIST_FAILURE_CACHE, {})
     if fetched is None or fetched.empty:
         failures[asset_code] = current
         return cached
 
     cache[asset_code] = fetched
-    if history_is_sufficient(fetched, days):
+    if runtime_history_is_usable(fetched, days, current):
         failures.pop(asset_code, None)
     else:
-        # Keep the usable partial history for RSI, but do not pay again every
-        # monitoring tick while MA200/52W data is still unavailable.
+        # Retain degraded history for display, but keep technical scoring off
+        # and avoid another paid attempt until the cooldown expires.
         failures[asset_code] = current
     return fetched
 

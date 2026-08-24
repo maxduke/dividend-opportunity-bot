@@ -15,6 +15,7 @@ from .config import (
     KEY_FAILURE_COUNT,
     KEY_FAILURE_SENT,
     KEY_HIST_CACHE,
+    KEY_HIST_FAILURE_CACHE,
     KEY_NAME_CACHE,
     TELEGRAM_TOKEN,
     log_config,
@@ -22,6 +23,7 @@ from .config import (
 )
 from .database import db_execute, db_init
 from .provider_bootstrap import install_data_provider_patch
+from .proxy_health import notify_proxy_health
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +40,13 @@ async def post_init(application: Application):
             BotCommand("opon", "开启机会监控: ID"),
             BotCommand("opoff", "关闭机会监控: ID"),
             BotCommand("opcheck", "查询机会分数"),
+            BotCommand("proxy_status", "查看 AKShare Proxy 状态"),
         ]
     )
     application.bot_data.update(
         {
             KEY_HIST_CACHE: {},
+            KEY_HIST_FAILURE_CACHE: {},
             KEY_NAME_CACHE: {},
             KEY_FAILURE_COUNT: 0,
             KEY_FAILURE_SENT: False,
@@ -55,6 +59,7 @@ async def post_init(application: Application):
     for rule in rules:
         if rule["asset_code"] and rule["asset_name"]:
             application.bot_data[KEY_NAME_CACHE][rule["asset_code"]] = rule["asset_name"]
+    await notify_proxy_health(application.bot, startup=True)
     logger.info("Bot application data 初始化完成。")
 
 
@@ -87,6 +92,7 @@ def main():
         help_command,
         list_opportunity_rules_command,
         list_whitelist_command,
+        proxy_status_command,
         refresh_cache_command,
         start_command,
         toggle_opportunity_rule_command,
@@ -109,6 +115,7 @@ def main():
             CommandHandler("add_w", add_whitelist_command),
             CommandHandler("del_w", del_whitelist_command),
             CommandHandler("list_w", list_whitelist_command),
+            CommandHandler("proxy_status", proxy_status_command),
             CommandHandler("refresh", refresh_cache_command),
         ]
     )

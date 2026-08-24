@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import math
 import os
 import sys
 
@@ -56,6 +57,12 @@ AKSHARE_PROXY_RETRY = int(os.getenv('AKSHARE_PROXY_RETRY', '30'))
 AKSHARE_PROXY_HOOK_DOMAINS = os.getenv(
     'AKSHARE_PROXY_HOOK_DOMAINS',
     'push2.eastmoney.com,push2his.eastmoney.com',
+)
+AKSHARE_PROXY_BALANCE_CACHE_MINUTES = float(
+    os.getenv('AKSHARE_PROXY_BALANCE_CACHE_MINUTES', '30')
+)
+AKSHARE_PROXY_LOW_BALANCE_THRESHOLD = float(
+    os.getenv('AKSHARE_PROXY_LOW_BALANCE_THRESHOLD', '0')
 )
 
 # --- 应用内常量 ---
@@ -137,6 +144,20 @@ def validate_config():
             "HISTORY_FAILURE_COOLDOWN_MINUTES 必须 >= 0，"
             f"当前值: {HISTORY_FAILURE_COOLDOWN_MINUTES}"
         )
+    if AKSHARE_PROXY_BALANCE_CACHE_MINUTES <= 0 or not math.isfinite(
+        AKSHARE_PROXY_BALANCE_CACHE_MINUTES
+    ):
+        errors.append(
+            "AKSHARE_PROXY_BALANCE_CACHE_MINUTES 必须是有限的正数，"
+            f"当前值: {AKSHARE_PROXY_BALANCE_CACHE_MINUTES}"
+        )
+    if AKSHARE_PROXY_LOW_BALANCE_THRESHOLD < 0 or not math.isfinite(
+        AKSHARE_PROXY_LOW_BALANCE_THRESHOLD
+    ):
+        errors.append(
+            "AKSHARE_PROXY_LOW_BALANCE_THRESHOLD 必须是有限的非负数，"
+            f"当前值: {AKSHARE_PROXY_LOW_BALANCE_THRESHOLD}"
+        )
     if ENABLE_AKSHARE_PROXY_PATCH:
         if not AKSHARE_PROXY_AUTH_TOKEN:
             errors.append("ENABLE_AKSHARE_PROXY_PATCH=true 时必须设置 AKSHARE_PROXY_AUTH_TOKEN")
@@ -178,6 +199,10 @@ def log_config():
     logger.info(
         f"AKShare代理调用超时: {AKSHARE_PROXY_CALL_TIMEOUT_SECONDS}秒，"
         f"历史失败冷却: {HISTORY_FAILURE_COOLDOWN_MINUTES}分钟"
+    )
+    logger.info(
+        f"AKShare代理余额缓存: {AKSHARE_PROXY_BALANCE_CACHE_MINUTES}分钟，"
+        f"低余额阈值: {AKSHARE_PROXY_LOW_BALANCE_THRESHOLD}"
     )
     logger.info(
         f"AKShare代理补丁: {'开启' if ENABLE_AKSHARE_PROXY_PATCH else '关闭'}"

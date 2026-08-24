@@ -15,22 +15,42 @@ from telegram.ext import ContextTypes
 
 from .config import (
     ADMIN_USER_ID,
+    AKSHARE_PROXY_LOW_BALANCE_THRESHOLD,
     BRIEFING_TIMES_STR,
     CSI_DIVIDEND_YIELD_FIELD,
+    ENABLE_AKSHARE_PROXY_PATCH,
     KEY_CACHE_DATE,
     KEY_HIST_CACHE,
+    KEY_HIST_FAILURE_CACHE,
     OPPORTUNITY_ALERT_THRESHOLD,
     PRICE_ADJUSTMENT,
     REQUEST_INTERVAL_SECONDS,
     RSI_PERIOD,
+    TECHNICAL_HISTORY_DAYS,
 )
-from .data_fetcher import _fetch_single_realtime_quote, get_asset_name_with_cache
-from .database import add_to_whitelist, db_execute, is_whitelisted, remove_from_whitelist
+from .data_fetcher import (
+    _fetch_single_realtime_quote,
+    get_asset_name_with_cache,
+    runtime_history_is_usable,
+)
+from .database import (
+    add_to_whitelist,
+    db_execute,
+    is_whitelisted,
+    remove_from_whitelist,
+)
 from .opportunity import (
     evaluate_opportunity,
     format_opportunity_chunks,
     record_rule_evaluation,
     save_opportunity_snapshot,
+)
+from .proxy_health import (
+    POSITIVE,
+    check_proxy_balance_async,
+    next_balance_retry_at,
+    notify_proxy_health,
+    proxy_patch_active,
 )
 from .valuation_fetcher import backfill_cn10y, get_cached_valuation
 
@@ -97,6 +117,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /del_w <code>ID</code> - 移除用户
 /list_w - 查看白名单
 /refresh - 清空历史数据缓存
+/proxy_status [refresh] - 查看 AKShare Proxy 状态
 
 <b>全局配置:</b>
 - RSI6 周期（Opportunity 战术因子）: <b>{RSI_PERIOD}</b>
@@ -286,7 +307,16 @@ async def check_opportunity_command(update: Update, context: ContextTypes.DEFAUL
     cache = context.bot_data.get(KEY_HIST_CACHE, {})
     first = True
     for rule in rules:
-        snapshot = await evaluate_opportunity(rule, context, hist_df=cache.get(rule["asset_code"]))
+        cached = cache.get(rule["asset_code"])
+        snapshot = await evaluate_opportunity(
+            rule,
+            context,
+            hist_df=(
+                cached
+                if runtime_history_is_usable(cached, TECHNICAL_HISTORY_DAYS)
+                else None
+            ),
+        )
         save_opportunity_snapshot(snapshot)
         record_rule_evaluation(rule["id"], snapshot)
         for chunk in format_opportunity_chunks(snapshot):
@@ -424,7 +454,57 @@ async def list_whitelist_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 @admin_only
+async def proxy_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args and context.args != ["refresh"]:
+        await update.message.reply_text("正确格式: /proxy_status [refresh]")
+        return
+    status = await check_proxy_balance_async(force=bool(context.args))
+    await notify_proxy_health(context.bot)
+    checked_at = status.checked_at.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M %z")
+    checked_at = f"{checked_at[:-2]}:{checked_at[-2:]}"
+    balance = "N/A" if status.balance is None else f"{status.balance:g}"
+    threshold = (
+        "disabled"
+        if AKSHARE_PROXY_LOW_BALANCE_THRESHOLD <= 0
+        else f"{AKSHARE_PROXY_LOW_BALANCE_THRESHOLD:g}"
+    )
+    active = proxy_patch_active()
+    history_state = (
+        "available"
+        if active and status.state == POSITIVE
+        else "degraded" if ENABLE_AKSHARE_PROXY_PATCH else "direct provider"
+    )
+    lines = [
+        "AKShare Proxy",
+        "",
+        f"Configured: {'YES' if ENABLE_AKSHARE_PROXY_PATCH else 'NO'}",
+        f"Patch active: {'YES' if active else 'NO'}",
+        f"Balance status: {status.state}",
+        f"Balance: {balance}",
+        f"Last checked: {checked_at}",
+        f"Low-balance threshold: {threshold}",
+        "",
+        f"ETF adjusted-history state: {history_state}",
+    ]
+    if ENABLE_AKSHARE_PROXY_PATCH and status.state != POSITIVE:
+        retry_at = next_balance_retry_at(status)
+        if retry_at is not None:
+            retry = retry_at.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M %z")
+            lines.append(f"Next balance retry: {retry[:-2]}:{retry[-2:]}")
+    if status.state == POSITIVE and not active and ENABLE_AKSHARE_PROXY_PATCH:
+        lines.extend(
+            [
+                "",
+                "Balance is now positive, but the proxy patch was not installed at startup.",
+                "Restart the bot to activate it safely.",
+            ]
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
+@admin_only
 async def refresh_cache_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data[KEY_HIST_CACHE] = {}
+    context.bot_data[KEY_HIST_FAILURE_CACHE] = {}
     context.bot_data[KEY_CACHE_DATE] = None
     await update.message.reply_text("✅ 历史数据缓存已清空，下次检查时将重新获取。")
