@@ -1,15 +1,11 @@
-# A股 / ETF 技术指标与红利机会监控 Telegram Bot
+# A股 / ETF 红利机会监控 Telegram Bot
 
-这是一个 Telegram 机器人，用于监控中国 A 股 / ETF 的 RSI 指标，以及基于红利指数估值、长期价格位置和短期 RSI 的 Opportunity Score。
-
-Legacy RSI monitoring remains supported；升级不会删除已有 RSI 规则。
+这是一个红利机会监控 Telegram 机器人：将红利指数估值、可交易资产的长期价格位置和 RSI6 短期节奏组合为 Opportunity Score。RSI6 是内部技术因子，不是独立的 RSI 规则产品。
 
 ## ✨ 功能特性
 
-- **多规则监控**: 支持为同一个资产设置多个不同的RSI监控区间。
-- **即时查询**: 用户可随时使用 `/check` 命令，获取所有监控资产的最新RSI值。
 - **红利机会监控**: 将可交易资产技术指标与独立 benchmark 指数估值分离，计算 0–100 Opportunity Score。
-- **收盘前简报**: 默认在每个交易日 14:50，向开启了此功能的用户推送 RSI 与红利机会评分。
+- **收盘前简报**: 默认在每个交易日 14:50，向开启了此功能的用户推送红利机会评分。
 - **白名单**: 只有授权的 Telegram 用户才能与机器人交互。
 - **开盘监控**: 任务仅在中国 A 股交易日及交易时段内运行，自动处理节假日和调休。
 - **高效缓存**: 资产名称和历史数据均有缓存机制，最大限度减少API调用。
@@ -21,13 +17,7 @@ Legacy RSI monitoring remains supported；升级不会删除已有 RSI 规则。
 
 - `/start` - 开始使用机器人。
 - `/help` - 获取帮助信息。
-- `/check` - 立即查询您所有激活规则的当前RSI值。
 - `/briefing on|off` - 开启或关闭您的每日收盘前简报。
-- `/add <code> <min> <max>` - 添加一条监控规则。
-- `/del <id>` - 删除一条规则。
-- `/list` - 查看您的所有监控规则。
-- `/on <id>` - 开启一条规则。
-- `/off <id>` - 关闭一条规则。
 
 ### Opportunity Monitor 命令
 
@@ -62,11 +52,8 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 | ----------------------------- | ---------------------------------- | ------ |
 | `CHECK_INTERVAL_SECONDS`      | 启用盘中监控时的规则检查间隔（秒）。 | `60`   |
 | `ENABLE_INTRADAY_MONITOR`     | 是否启用盘中循环及自动告警；场外联接基金建议关闭，场内 ETF 可开启。 | `false` |
-| `RSI_PERIOD`                  | 计算RSI指标的周期.                 | `6`    |
-| `USE_ADJUST`                  | 是否使用前复权价格 (`true`=是, `false`=否)。启用后，会将实时价格按最新交易日的复权因子转换为复权尺度。 | `true` |
-| `HIST_FETCH_DAYS`             | 获取用于计算RSI的历史数据的天数.   | `200`   |
+| `RSI_PERIOD`                  | Opportunity 的 RSI 技术因子周期。 | `6`    |
 | `TECHNICAL_HISTORY_DAYS`      | 获取 MA200 / 52 周指标的自然日窗口. | `550` |
-| `MAX_NOTIFICATIONS_PER_TRIGGER` | 每个上海自然日内、单条规则处于触发区间时发送通知的最大次数；次日会自动重置。 | `1`    |
 
 ### 高级配置
 
@@ -80,11 +67,11 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 | `AKSHARE_CALL_TIMEOUT_SECONDS` | 单次 AKShare 阻塞调用的异步等待上限；超时后进入已有 retry/fallback。 | `15` |
 | `AKSHARE_PROXY_CALL_TIMEOUT_SECONDS` | proxy 模式下 EastMoney 调用的等待上限。 | `300` |
 | `HISTORY_FAILURE_COOLDOWN_MINUTES` | 历史数据连续失败后的冷却时间，避免监控循环重复请求。 | `30` |
-| `ENABLE_OPPORTUNITY_MONITOR` | Opportunity Monitor 主开关。 | `true` |
 | `VALUATION_CACHE_HOURS` | 同一 benchmark 的估值缓存时间。 | `12` |
 | `BOND_CACHE_HOURS` | 所有规则共享的中国十年期国债缓存时间。 | `12` |
-| `VALUATION_STALE_MAX_DAYS` | 估值日期超过该日历天数后降级为 WATCH。 | `7` |
+| `VALUATION_STALE_MAX_TRADING_DAYS` | 估值日期超过该交易日数后降级为 WATCH。 | `3` |
 | `VALUATION_PERCENTILE_MIN_OBS` | 启用历史估值分位所需的最少样本数。 | `252` |
+| `VALUATION_PERCENTILE_MIN_SPAN_YEARS` | 启用成熟历史估值分位所需的最短实际历史跨度（年）。 | `2.0` |
 | `VALUATION_PERCENTILE_LOOKBACK_YEARS` | 估值分位回看年数。 | `5` |
 | `CSI_DIVIDEND_YIELD_FIELD` | 评分使用 `股息率1` 或 `股息率2`。 | `股息率2` |
 | `OPPORTUNITY_ALERT_THRESHOLD` | `/addop` 未指定阈值时使用的告警阈值。 | `60` |
@@ -92,7 +79,17 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
 | `OPPORTUNITY_ALERT_COOLDOWN_MINUTES` | 普通机会告警冷却时间。 | `240` |
 | `OPPORTUNITY_MAX_ALERTS_PER_DAY` | 每条机会规则每日普通告警上限；等级升级可覆盖。 | `1` |
 
-场外联接基金的默认模式是 `ENABLE_INTRADAY_MONITOR=false`：60 秒任务会在访问数据源前立即返回，仅在 14:50 简报或手动 `/check`、`/opcheck` 时计算。场内 ETF 需要盘中告警时将该开关设为 `true`。简报还需用户执行一次 `/briefing on`。
+场外联接基金的默认模式是 `ENABLE_INTRADAY_MONITOR=false`：不会注册 60 秒循环任务，仅在 14:50 简报或手动 `/opcheck` 时计算。场内 ETF 需要盘中告警时将该开关设为 `true`。简报还需用户执行一次 `/briefing on`。
+
+Opportunity Score 的 V1 权重固定为：估值 50 分（股息率 30、股息率 - 中国十年期国债利差 20）、长期价格位置 30 分（MA200 20、52 周回撤 10）、战术时机 20 分（RSI6 20）。本版本不调权重；历史回放工具用于提供后续 V2 评估证据。
+
+```bash
+python scripts/analyze_scoring.py --asset 515180 --benchmark 000922 --db /app/data/rules.db
+```
+
+回放从数据库已有的 CSI 估值和 CN10Y 历史起步，并获取 qfq 日线；它只输出分数分布、相关性和 forward-return 描述，不会修改运行时权重。
+
+Opportunity 监控始终使用前复权（`qfq`）价格。原始价格仅可用于展示或数据源诊断，不参与 MA200、52 周回撤或 RSI6 评分。
 
 ### 可选的东方财富代理
 
@@ -120,6 +117,10 @@ Docker 部署请保留 `.env.example` 中的 `DB_FILE=/app/data/rules.db`，确�
     ```
 5.  **查看日志**: `docker-compose logs -f`
 6.  **停止服务**: `docker-compose down`
+
+## Database backup
+
+`/app/data/rules.db` 保存逐渐累积的本地历史，包括 CSI 估值、中国十年期国债、Opportunity 快照和历史规则数据。请使用文件系统 / NAS 快照，或定期复制该文件进行备份；机器人不会在应用内自动执行备份。
 
 ## 数据源与风险说明
 

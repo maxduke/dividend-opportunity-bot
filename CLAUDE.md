@@ -2,7 +2,7 @@
 
 ## 项目概述
 
-A 股 / ETF RSI(6) 与红利 Opportunity Score 监控 Telegram 机器人。旧 RSI 规则保持兼容；Opportunity Monitor 将指数估值、资产长期价格位置和 RSI 短期节奏组合为可解释评分。
+红利 Opportunity Score 监控 Telegram 机器人。Opportunity Monitor 将指数估值、资产长期价格位置和 RSI6 短期节奏组合为可解释评分；RSI6 仅是内部技术因子，不是独立的 RSI 规则产品。
 
 **技术栈**: Python 3.12+ / python-telegram-bot / akshare / pandas / SQLite / Docker
 
@@ -13,7 +13,7 @@ src/
 ├── main.py            # 入口：配置验证 → DB 初始化 → 注册 handlers/jobs → run_polling
 ├── config.py          # 环境变量加载、值范围验证、常量定义、日志配置
 ├── database.py        # SQLite 持久连接 + threading.Lock 保护，白名单 CRUD
-├── data_fetcher.py    # 数据获取（东方财富/新浪双源容灾）、RSI 计算、缓存
+├── data_fetcher.py    # 数据获取（东方财富/新浪双源容灾）、价格缓存
 ├── provider_bootstrap.py # 可选 akshare-proxy-patch 启动配置
 ├── valuation_fetcher.py # 中证估值与中国十年国债获取、缓存、持久化
 ├── metrics.py         # Opportunity 指标与评分纯函数
@@ -21,7 +21,7 @@ src/
 ├── opportunity.py     # Opportunity 评估、门控、消息格式与告警判断
 ├── market.py          # XSHG 交易日历与超出覆盖期的 AKShare 按日回退
 ├── handlers.py        # 所有 Telegram 命令处理器（@whitelisted_only/@admin_only）
-├── jobs.py            # 后台定时任务：check_rules_job、daily_briefing_job
+├── jobs.py            # 后台定时任务：check_opportunity_job、daily_briefing_job
 └── utils.py           # 共享工具：normalize_hist_df()、get_sina_symbol()
 ```
 
@@ -71,10 +71,10 @@ docker-compose up -d --build
 
 ## 关键业务逻辑
 
-- **RSI 算法**: Wilder 平滑（EWM alpha=1/N），复刻同花顺/东财口径，见 `data_fetcher.calculate_rsi_exact()`
-- **复权处理**: 计算复权因子（复权收盘/未复权收盘），将实时价格转换到复权尺度
+- **RSI 算法**: 使用递归 Wilder 平滑（EWM alpha=1/N）作为 Opportunity 的 RSI6 因子，不宣称与特定平台精确一致
+- **复权处理**: Opportunity 技术指标始终使用前复权（qfq）价格；无法可靠转换实时价格时使用最近确认的 qfq 收盘并标记降级
 - **数据源容灾**: 东方财富请求失败后自动切换新浪；proxy 模式下优先使用免费源
-- **通知去重**: 进入区间后发送 N 次通知（可配），离开区间自动重置计数器
+- **Opportunity 告警**: 盘中监控可选；自动告警使用精简消息，`/opcheck` 提供完整审计细节
 - **机会评分门控**: 估值缺失、过期或估值分过低时不得升级到 MODERATE 以上
 - **请求成本控制**: 技术历史每日缓存；估值和国债默认缓存 12 小时；代理请求不叠加应用层重试
 

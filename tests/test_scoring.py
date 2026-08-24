@@ -22,3 +22,10 @@ def test_valuation_gate_caps_missing_or_weak_valuation_at_watch():
     assert classify_opportunity_level(100, valuation_available=True, valuation_score=19.99) == "WATCH"
     assert classify_opportunity_level(100, valuation_available=True, valuation_score=20) == "RARE"
     assert classify_opportunity_level(100, valuation_available=True, stale_valuation=True) == "WATCH"
+
+
+def test_rare_requires_mature_percentile_mode():
+    assert classify_opportunity_level(95, scoring_mode="ABSOLUTE_FALLBACK") == "STRONG"
+    assert classify_opportunity_level(95, scoring_mode="MIXED") == "STRONG"
+    assert classify_opportunity_level(95, scoring_mode="PERCENTILE") == "RARE"
+    assert classify_opportunity_level(95, scoring_mode="NONE") == "WATCH"

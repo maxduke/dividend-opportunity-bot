@@ -21,15 +21,18 @@ from .config import (
     TECHNICAL_HISTORY_DAYS,
     VALUATION_PERCENTILE_LOOKBACK_YEARS,
     VALUATION_PERCENTILE_MIN_OBS,
-    VALUATION_STALE_MAX_DAYS,
+    VALUATION_PERCENTILE_MIN_SPAN_YEARS,
+    VALUATION_STALE_MAX_TRADING_DAYS,
 )
 from .data_fetcher import (
-    _fetch_single_realtime_price,
+    RealtimeQuote,
+    _fetch_single_realtime_quote,
+    build_indicator_close_series,
     calculate_rsi,
     get_history_data_cached,
-    get_prices_for_rsi,
 )
 from .database import db_execute
+from .market import trading_sessions_elapsed
 from .metrics import (
     calculate_52w_drawdown,
     calculate_52w_high,
@@ -94,6 +97,8 @@ class OpportunitySnapshot:
     valuation_date: Optional[str] = None
     cn10y_date: Optional[str] = None
     cn10y_source: Optional[str] = None
+    technical_price_date: Optional[str] = None
+    technical_price_basis: str = "unavailable"
 
 
 def _now() -> datetime:
@@ -117,6 +122,14 @@ def _date_or_none(value) -> Optional[date]:
         return None
 
 
+def _row_value(row, key: str, default=None):
+    """Read dict-like provider/database rows without assuming every column exists."""
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
 def _cache_history_is_long_enough(frame) -> bool:
     if frame is None or frame.empty or "收盘" not in frame.columns:
         return False
@@ -138,7 +151,7 @@ def _match_bond(rows, target_date: date):
     return matched if row_date and (target_date - row_date).days <= 7 else None
 
 
-def _history_spreads(valuation_rows, bond_rows, field: str) -> list[float]:
+def _history_spreads(valuation_rows, bond_rows, field: str) -> list[tuple[date, float]]:
     field = "dividend_yield1" if field == "股息率1" else "dividend_yield2"
     spreads = []
     for row in valuation_rows:
@@ -150,20 +163,38 @@ def _history_spreads(valuation_rows, bond_rows, field: str) -> list[float]:
         if bond is not None:
             cn10y = _float_or_none(bond["cn10y"])
             if cn10y is not None:
-                spreads.append(value - cn10y)
+                spreads.append((valuation_date, value - cn10y))
     return spreads
 
 
-def _history_span_years(rows, value_field: str) -> tuple[int, float]:
-    dates = [
-        _date_or_none(row["valuation_date"])
-        for row in rows
-        if _float_or_none(row[value_field]) is not None
+def _dated_values(rows, value_field: str) -> list[tuple[date, float]]:
+    """Keep only valid valuation observations together with their dates."""
+    values = []
+    for row in rows:
+        value = _float_or_none(row[value_field])
+        row_date = _date_or_none(row["valuation_date"])
+        if value is not None and row_date is not None:
+            values.append((row_date, value))
+    return values
+
+
+def _history_maturity(
+    dated_values: list[tuple[date, float]],
+    min_observations: int = VALUATION_PERCENTILE_MIN_OBS,
+    min_span_years: float = VALUATION_PERCENTILE_MIN_SPAN_YEARS,
+) -> tuple[int, float, bool]:
+    """Return count, actual date span, and mature-percentile eligibility."""
+    valid = [
+        (row_date, value)
+        for row_date, value in dated_values
+        if isinstance(row_date, date) and _float_or_none(value) is not None
     ]
-    dates = [value for value in dates if value is not None]
-    if len(dates) < 2:
-        return len(dates), 0.0
-    return len(dates), (max(dates) - min(dates)).days / 365.0
+    if not valid:
+        return 0, 0.0, False
+    dates = [row_date for row_date, _ in valid]
+    span_years = (max(dates) - min(dates)).days / 365.0 if len(dates) >= 2 else 0.0
+    count = len(valid)
+    return count, span_years, count >= min_observations and span_years >= min_span_years
 
 
 def _quality(
@@ -194,6 +225,7 @@ async def evaluate_opportunity(
     context,
     spot_price: Optional[float] = None,
     hist_df=None,
+    quote: Optional[RealtimeQuote] = None,
 ) -> OpportunitySnapshot:
     """Evaluate one rule; network data is supplied by shared caches where possible."""
     now = _now()
@@ -219,26 +251,49 @@ async def evaluate_opportunity(
             fetched.attrs["technical_history_days"] = TECHNICAL_HISTORY_DAYS
             cache[asset_code] = fetched
             hist_df = fetched
-    if spot_price is None:
-        spot_price = await _fetch_single_realtime_price(asset_code)
+    if quote is None and isinstance(spot_price, RealtimeQuote):
+        quote = spot_price
+        spot_price = quote.price
+    if quote is None and spot_price is None:
+        quote = await _fetch_single_realtime_quote(asset_code)
+    elif quote is None and spot_price is not None:
+        quote = RealtimeQuote(float(spot_price), None)
+    if spot_price is None and quote is not None:
+        spot_price = quote.price
 
-    prices = get_prices_for_rsi(hist_df, spot_price) if hist_df is not None and spot_price is not None else None
-    current_price = _float_or_none(prices.iloc[-1]) if prices is not None and not prices.empty else _float_or_none(spot_price)
-    closes = prices if prices is not None else pd.Series(dtype=float)
+    indicator_series = build_indicator_close_series(hist_df, quote, now=now)
+    closes = indicator_series.closes
+    current_price = _float_or_none(indicator_series.current_price)
     historical_closes = (
         valid_close_count(hist_df["收盘"])
         if hist_df is not None and not hist_df.empty and "收盘" in hist_df.columns
         else 0
     )
-    technical_basis_available = hist_df is None or hist_df.attrs.get("price_basis") != "unadjusted_fallback"
+    technical_basis_available = (
+        hist_df is not None
+        and not hist_df.empty
+        and hist_df.attrs.get("price_basis") == "qfq"
+        and not closes.empty
+    )
     ma200 = calculate_ma200(closes) if technical_basis_available and historical_closes >= 200 else None
     ma_deviation = calculate_ma200_deviation(current_price, ma200)
     high_52w = calculate_52w_high(closes) if technical_basis_available and historical_closes >= 252 else None
     drawdown = calculate_52w_drawdown(current_price, high_52w)
-    rsi6 = calculate_rsi(prices) if prices is not None else None
+    rsi6 = calculate_rsi(closes) if technical_basis_available and not closes.empty else None
     technical_complete = ma200 is not None and high_52w is not None
+    technical_price_basis = (
+        "qfq_realtime" if technical_basis_available and indicator_series.spot_used
+        else "qfq_history_close" if technical_basis_available
+        else "unavailable"
+    )
+    technical_price_date = (
+        indicator_series.price_date.isoformat()
+        if indicator_series.price_date is not None else None
+    )
+    if indicator_series.note:
+        notes.append(indicator_series.note)
     if not technical_basis_available:
-        notes.append("Adjusted ETF history unavailable; MA200 and 52-week drawdown disabled")
+        notes.append("Adjusted history unavailable; MA200, 52-week drawdown, and RSI disabled")
     elif ma200 is None:
         notes.append("MA200 unavailable: fewer than 200 valid close observations")
     if technical_basis_available and high_52w is None:
@@ -247,7 +302,7 @@ async def evaluate_opportunity(
         notes.append("Technical history unavailable")
 
     valuation = await get_cached_valuation(benchmark_code, bot_data)
-    valuation_date = _date_or_none(valuation["valuation_date"]) if valuation else None
+    valuation_date = _date_or_none(_row_value(valuation, "valuation_date")) if valuation else None
     valuation_field = "dividend_yield1" if CSI_DIVIDEND_YIELD_FIELD == "股息率1" else "dividend_yield2"
     valuation_available = valuation is not None and _float_or_none(valuation[valuation_field]) is not None
     dividend_yield1 = _float_or_none(valuation["dividend_yield1"]) if valuation else None
@@ -255,13 +310,36 @@ async def evaluate_opportunity(
     dividend_yield_used = _float_or_none(valuation[valuation_field]) if valuation else None
     pe1 = _float_or_none(valuation["pe1"]) if valuation else None
     pe2 = _float_or_none(valuation["pe2"]) if valuation else None
-    stale = bool(valuation_date and (now.date() - valuation_date).days > VALUATION_STALE_MAX_DAYS)
+    stale = False
     if not valuation:
         notes.append("Dividend yield unavailable; valuation safety gate applied")
     elif not valuation_available:
         notes.append(f"Selected dividend-yield field unavailable: {CSI_DIVIDEND_YIELD_FIELD}")
-    elif stale:
-        notes.append(f"Valuation date {valuation_date.isoformat()} exceeds {VALUATION_STALE_MAX_DAYS} calendar days")
+    elif valuation_date is None:
+        # A value without a date cannot be trusted as fresh.  Keep the value
+        # visible for diagnostics, but let the normal stale gate cap the level.
+        stale = True
+        notes.append("Valuation date unavailable; freshness cannot be determined")
+    else:
+        try:
+            sessions = trading_sessions_elapsed(valuation_date, now.date())
+        except Exception as exc:
+            logger.warning("交易日历新鲜度判断失败: %s", exc)
+            sessions = None
+        if sessions is None:
+            stale = (now.date() - valuation_date).days > 14
+            notes.append("Trading-calendar freshness unavailable; calendar-day fallback used.")
+            if stale:
+                notes.append(
+                    f"Valuation date {valuation_date.isoformat()} exceeds 14 calendar days"
+                )
+        else:
+            stale = sessions > VALUATION_STALE_MAX_TRADING_DAYS
+            if stale:
+                notes.append(
+                    f"Valuation date {valuation_date.isoformat()} is {sessions} trading sessions old "
+                    f"(max {VALUATION_STALE_MAX_TRADING_DAYS})"
+                )
 
     dy_percentile = None
     spread_percentile = None
@@ -277,14 +355,10 @@ async def evaluate_opportunity(
             - pd.DateOffset(years=VALUATION_PERCENTILE_LOOKBACK_YEARS)
         ).date()
         valuation_rows = get_valuation_history(benchmark_code, cutoff, valuation_date)
-        dy_history = [
-            _float_or_none(row[valuation_field])
-            for row in valuation_rows
-        ]
-        dy_history = [value for value in dy_history if value is not None]
-        dy_history_complete = len(dy_history) >= VALUATION_PERCENTILE_MIN_OBS
-        dy_observations, dy_span_years = _history_span_years(valuation_rows, valuation_field)
-        if dy_history_complete:
+        dy_dated_values = _dated_values(valuation_rows, valuation_field)
+        dy_history = [value for _, value in dy_dated_values]
+        dy_observations, dy_span_years, dy_history_complete = _history_maturity(dy_dated_values)
+        if dy_history_complete and dividend_yield_used is not None:
             dy_percentile = calculate_percentile(dividend_yield_used, dy_history)
             notes.append(
                 f"Dividend-yield history: {dy_observations} observations, span {dy_span_years:.1f} years; percentile used"
@@ -309,16 +383,16 @@ async def evaluate_opportunity(
             notes.append("No China 10Y observation within 7 calendar days before valuation date")
 
         spread_rows = _history_spreads(valuation_rows, bond_rows, CSI_DIVIDEND_YIELD_FIELD)
-        spread_history_complete = len(spread_rows) >= VALUATION_PERCENTILE_MIN_OBS
-        _, spread_span_years = _history_span_years(valuation_rows, valuation_field)
+        spread_values = [value for _, value in spread_rows]
+        spread_observations, spread_span_years, spread_history_complete = _history_maturity(spread_rows)
         if spread_history_complete and spread is not None:
-            spread_percentile = calculate_percentile(spread, spread_rows)
+            spread_percentile = calculate_percentile(spread, spread_values)
             notes.append(
-                f"Spread history: {len(spread_rows)} observations, valuation span {spread_span_years:.1f} years; percentile used"
+                f"Spread history: {spread_observations} observations, span {spread_span_years:.1f} years; percentile used"
             )
         elif not spread_history_complete:
             notes.append(
-                f"Spread percentile unavailable: {len(spread_rows)} observations, valuation span {spread_span_years:.1f} years; absolute thresholds used"
+                f"Spread percentile unavailable: {spread_observations} observations, span {spread_span_years:.1f} years; absolute thresholds used"
             )
     else:
         notes.append("Valuation-dependent spread is unavailable")
@@ -329,14 +403,6 @@ async def evaluate_opportunity(
     long_term_score = total_score(score_ma200(ma_deviation), score_drawdown(drawdown))
     tactical_score = score_rsi(rsi6)
     score = total_score(valuation_score, long_term_score, tactical_score)
-    level = classify_opportunity_level(
-        score,
-        valuation_available=valuation_available,
-        valuation_score=valuation_score,
-        stale_valuation=stale,
-        min_valuation_score=MIN_VALUATION_SCORE_FOR_OPPORTUNITY,
-    )
-
     if not valuation_available:
         scoring_mode = "NONE"
     elif dy_percentile is not None and spread_percentile is not None:
@@ -345,6 +411,14 @@ async def evaluate_opportunity(
         scoring_mode = "ABSOLUTE_FALLBACK"
     else:
         scoring_mode = "MIXED"
+    level = classify_opportunity_level(
+        score,
+        valuation_available=valuation_available,
+        valuation_score=valuation_score,
+        stale_valuation=stale,
+        min_valuation_score=MIN_VALUATION_SCORE_FOR_OPPORTUNITY,
+        scoring_mode=scoring_mode,
+    )
     data_quality = _quality(
         valuation_available,
         stale,
@@ -353,6 +427,11 @@ async def evaluate_opportunity(
         dy_history_complete,
         spread_history_complete,
     )
+    if (
+        data_quality == "OK"
+        and any("adjustment factor unavailable" in note.lower() for note in notes)
+    ):
+        data_quality = "DEGRADED"
     if cn10y_source == "sina":
         notes.append("CN10Y source: Sina fallback")
 
@@ -388,9 +467,11 @@ async def evaluate_opportunity(
         scoring_mode=scoring_mode,
         data_quality=data_quality,
         data_notes=notes,
-        valuation_date=valuation["valuation_date"] if valuation else None,
+        valuation_date=_row_value(valuation, "valuation_date") if valuation else None,
         cn10y_date=cn10y_date,
         cn10y_source=cn10y_source,
+        technical_price_date=technical_price_date,
+        technical_price_basis=technical_price_basis,
     )
     logger.info(
         "[OPPORTUNITY] %s / asset %s DY=%s CN10Y=%s Spread=%s MADev=%s DD52=%s RSI6=%s Score=%s Level=%s Mode=%s",
@@ -428,7 +509,12 @@ def snapshot_should_persist(rule_id: int, snapshot: OpportunitySnapshot, alert_s
     return abs(float(previous["total_score"] or 0) - snapshot.total_score) >= 5
 
 
-def save_opportunity_snapshot(snapshot: OpportunitySnapshot, alert_sent: bool = False) -> None:
+def save_opportunity_snapshot(
+    snapshot: OpportunitySnapshot,
+    alert_sent: bool = False,
+    critical: bool = False,
+) -> None:
+    """Save a snapshot; alert/explicit critical writes propagate DB errors."""
     db_execute(
         """
         INSERT INTO opportunity_snapshots (
@@ -438,8 +524,9 @@ def save_opportunity_snapshot(snapshot: OpportunitySnapshot, alert_sent: bool = 
             dividend_bond_spread, spread_percentile, dividend_yield_score,
             spread_score, valuation_score, long_term_score, tactical_score,
             total_score, level, scoring_mode, data_quality, data_notes,
-            valuation_date, cn10y_date, cn10y_source, alert_sent
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            valuation_date, cn10y_date, cn10y_source,
+            technical_price_date, technical_price_basis, alert_sent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot.rule_id,
@@ -472,8 +559,11 @@ def save_opportunity_snapshot(snapshot: OpportunitySnapshot, alert_sent: bool = 
             snapshot.valuation_date,
             snapshot.cn10y_date,
             snapshot.cn10y_source,
+            snapshot.technical_price_date,
+            snapshot.technical_price_basis,
             int(alert_sent),
         ),
+        swallow_errors=not (critical or alert_sent),
     )
 
 
@@ -481,6 +571,7 @@ def record_rule_evaluation(rule_id: int, snapshot: OpportunitySnapshot, now: Opt
     db_execute(
         "UPDATE opportunity_rules SET last_score = ?, last_level = ?, updated_at = ? WHERE id = ?",
         (snapshot.total_score, snapshot.level, (now or _now()).isoformat(), rule_id),
+        swallow_errors=False,
     )
 
 
@@ -493,6 +584,7 @@ def record_rule_alert(rule_id: int, snapshot: OpportunitySnapshot, now: Optional
         WHERE id = ?
         """,
         (snapshot.total_score, snapshot.level, alert_at, alert_at, rule_id),
+        swallow_errors=False,
     )
 
 
@@ -501,9 +593,11 @@ def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
     try:
         parsed = datetime.fromisoformat(value)
-        return SHANGHAI_TZ.localize(parsed) if parsed.tzinfo is None else parsed.astimezone(SHANGHAI_TZ)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=SHANGHAI_TZ)
+    return parsed.astimezone(SHANGHAI_TZ)
 
 
 def should_send_opportunity_alert(
@@ -583,8 +677,47 @@ def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optio
         f"52W Drawdown: {score_drawdown(snapshot.drawdown_52w):.0f} / 10\n"
         f"RSI6: {score_rsi(snapshot.rsi6):.0f} / 20\n\n"
         f"Total: <b>{snapshot.total_score:.0f} / 100</b>\n\n"
+        f"📅 <b>Data dates</b>\n"
+        f"Technical price: {html.escape(snapshot.technical_price_date or 'N/A')}\n"
+        f"Basis: <code>{html.escape(snapshot.technical_price_basis or 'unavailable')}</code>\n"
+        f"CSI valuation: {html.escape(snapshot.valuation_date or 'N/A')}\n"
+        f"China 10Y: {html.escape(snapshot.cn10y_date or 'N/A')}\n"
+        f"Source: {html.escape(snapshot.cn10y_source or 'N/A')}\n\n"
         f"Data Quality: <code>{snapshot.data_quality}</code>\n"
         f"Notes:\n{notes}"
+    )
+
+
+def format_opportunity_alert(snapshot: OpportunitySnapshot, reason: Optional[str] = None) -> str:
+    """Compact automatic alert; full audit remains available via /opcheck."""
+    icon = {"NEUTRAL": "⚪", "WATCH": "🟡", "MODERATE": "🟢", "STRONG": "🟢", "RARE": "🔥"}.get(snapshot.level, "⚪")
+
+    def f(value, digits=2, suffix=""):
+        return "N/A" if value is None else f"{float(value):.{digits}f}{suffix}"
+
+    trigger = {
+        "threshold-crossing": "Opportunity score crossed the alert threshold",
+        "level-upgrade": "Opportunity level upgraded",
+    }.get(reason or "", reason or "Opportunity alert")
+    return (
+        f"{icon} <b>{html.escape(snapshot.level)} Opportunity</b> — <b>{snapshot.total_score:.0f}/100</b>\n\n"
+        f"{html.escape(snapshot.asset_name)} (<code>{html.escape(snapshot.asset_code)}</code>)\n"
+        f"Benchmark: {html.escape(snapshot.benchmark_name)}\n\n"
+        f"Valuation       {snapshot.valuation_score:.0f}/50\n"
+        f"Long-Term       {snapshot.long_term_score:.0f}/30\n"
+        f"Tactical        {snapshot.tactical_score:.0f}/20\n\n"
+        f"DY              {f(snapshot.dividend_yield_used, 2, '%')}\n"
+        f"DY-CN10Y        {f(snapshot.dividend_bond_spread, 2, 'pp')}\n"
+        f"MA200           {f(None if snapshot.ma200_deviation is None else snapshot.ma200_deviation * 100, 1, '%')}\n"
+        f"52W DD          {f(None if snapshot.drawdown_52w is None else snapshot.drawdown_52w * 100, 1, '%')}\n"
+        f"RSI{RSI_PERIOD}            {f(snapshot.rsi6, 1)}\n\n"
+        f"Valuation date  {html.escape(snapshot.valuation_date or 'N/A')}\n"
+        f"CN10Y date      {html.escape(snapshot.cn10y_date or 'N/A')}\n"
+        f"Price date      {html.escape(snapshot.technical_price_date or 'N/A')}\n\n"
+        f"Mode            <code>{html.escape(snapshot.scoring_mode)}</code>\n"
+        f"Data            <code>{html.escape(snapshot.data_quality)}</code>\n\n"
+        f"Trigger: {html.escape(trigger)}\n"
+        f"Use /opcheck {snapshot.rule_id} for full details."
     )
 
 

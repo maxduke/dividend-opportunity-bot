@@ -1,9 +1,16 @@
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pandas as pd
+
+
+def test_proxy_disables_application_level_eastmoney_retries(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    assert data_fetcher._em_retry_attempts() == 1
 
 
 def test_proxy_history_prefers_sina_and_skips_eastmoney(monkeypatch):
@@ -22,7 +29,6 @@ def test_proxy_history_prefers_sina_and_skips_eastmoney(monkeypatch):
         return history.copy()
 
     monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
-    monkeypatch.setattr(data_fetcher, "USE_ADJUST", True)
     monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
 
     result = asyncio.run(data_fetcher.get_history_data("000001", 550))
@@ -48,7 +54,6 @@ def test_adjusted_etf_history_uses_one_eastmoney_call(monkeypatch):
         return history.copy()
 
     monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
-    monkeypatch.setattr(data_fetcher, "USE_ADJUST", True)
     monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
 
     result = asyncio.run(data_fetcher.get_history_data("510300", 550))
@@ -75,7 +80,6 @@ def test_adjusted_etf_sina_fallback_is_marked_unadjusted(monkeypatch):
         return history.copy()
 
     monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
-    monkeypatch.setattr(data_fetcher, "USE_ADJUST", True)
     monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
 
     result = asyncio.run(data_fetcher.get_history_data("510300", 550))
@@ -143,7 +147,7 @@ def test_fresh_persisted_valuation_skips_network(monkeypatch):
     fetch.assert_not_awaited()
 
 
-def test_failed_valuation_refresh_is_not_repeated_within_ttl(monkeypatch):
+def test_failed_valuation_refresh_is_not_repeated_during_cooldown(monkeypatch):
     from src import valuation_fetcher
 
     fetch = AsyncMock(return_value=None)
@@ -154,6 +158,26 @@ def test_failed_valuation_refresh_is_not_repeated_within_ttl(monkeypatch):
     assert asyncio.run(valuation_fetcher.get_cached_valuation("000922", bot_data)) is None
     assert asyncio.run(valuation_fetcher.get_cached_valuation("000922", bot_data)) is None
     fetch.assert_awaited_once()
+
+
+def test_failed_valuation_refresh_retries_after_failure_cooldown(monkeypatch):
+    from src import valuation_fetcher
+
+    fetch = AsyncMock(return_value=None)
+    monkeypatch.setattr(valuation_fetcher, "get_latest_valuation", lambda code: None)
+    monkeypatch.setattr(valuation_fetcher, "fetch_csi_valuation", fetch)
+    first_now = datetime(2026, 8, 24, 10, 0, tzinfo=valuation_fetcher.SHANGHAI_TZ)
+    monkeypatch.setattr(valuation_fetcher, "_now", lambda: first_now)
+    bot_data = {}
+
+    assert asyncio.run(valuation_fetcher.get_cached_valuation("000922", bot_data)) is None
+    monkeypatch.setattr(
+        valuation_fetcher,
+        "_now",
+        lambda: first_now + valuation_fetcher.PROVIDER_FAILURE_COOLDOWN + timedelta(seconds=1),
+    )
+    assert asyncio.run(valuation_fetcher.get_cached_valuation("000922", bot_data)) is None
+    assert fetch.await_count == 2
 
 
 def test_fresh_persisted_bond_skips_network(monkeypatch):
@@ -177,3 +201,26 @@ def test_fresh_persisted_bond_skips_network(monkeypatch):
 
     assert result == latest
     fetch.assert_not_awaited()
+
+
+def test_failed_bond_refresh_retries_after_failure_cooldown(monkeypatch):
+    from src import valuation_fetcher
+
+    fetch = AsyncMock(return_value=(None, "sina"))
+    monkeypatch.setattr(valuation_fetcher, "latest_bond_on_or_before", lambda *args, **kwargs: None)
+    monkeypatch.setattr(valuation_fetcher, "fetch_cn10y", fetch)
+    first_now = datetime(2026, 8, 24, 10, 0, tzinfo=valuation_fetcher.SHANGHAI_TZ)
+    monkeypatch.setattr(valuation_fetcher, "_now", lambda: first_now)
+    bot_data = {}
+
+    assert asyncio.run(valuation_fetcher.get_cached_cn10y(bot_data)) is None
+    assert asyncio.run(valuation_fetcher.get_cached_cn10y(bot_data)) is None
+    assert fetch.await_count == 1
+
+    monkeypatch.setattr(
+        valuation_fetcher,
+        "_now",
+        lambda: first_now + valuation_fetcher.PROVIDER_FAILURE_COOLDOWN + timedelta(seconds=1),
+    )
+    assert asyncio.run(valuation_fetcher.get_cached_cn10y(bot_data)) is None
+    assert fetch.await_count == 2

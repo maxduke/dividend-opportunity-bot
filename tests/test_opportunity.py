@@ -1,12 +1,24 @@
 import asyncio
-from datetime import datetime
+import sqlite3
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
 
-from src.opportunity import OpportunitySnapshot, evaluate_opportunity, format_opportunity_detail, should_send_opportunity_alert
+from src.opportunity import (
+    OpportunitySnapshot,
+    _history_maturity,
+    _history_spreads,
+    evaluate_opportunity,
+    format_opportunity_alert,
+    format_opportunity_detail,
+    record_rule_alert,
+    record_rule_evaluation,
+    save_opportunity_snapshot,
+    should_send_opportunity_alert,
+)
 
 
 def _rule(**changes):
@@ -65,6 +77,48 @@ def test_alert_detail_contains_trigger_reason():
     assert "分数跨过该规则告警阈值" in format_opportunity_detail(
         _snapshot(62, "MODERATE"), alert_reason="threshold-crossing"
     )
+
+
+def test_compact_alert_omits_pe_and_full_notes_but_detail_shows_dates():
+    snapshot = _snapshot(78, "STRONG")
+    snapshot.pe1 = 8.1
+    snapshot.pe2 = 7.9
+    snapshot.dividend_yield_used = 5.42
+    snapshot.technical_price_date = "2026-08-24"
+    snapshot.technical_price_basis = "qfq_realtime"
+    snapshot.valuation_date = "2026-08-23"
+    snapshot.cn10y_date = "2026-08-23"
+    snapshot.cn10y_source = "chinabond"
+    snapshot.data_notes = ["full audit note"]
+
+    alert = format_opportunity_alert(snapshot, "level-upgrade")
+    detail = format_opportunity_detail(snapshot)
+
+    assert "PE1" not in alert and "PE2" not in alert and "full audit note" not in alert
+    assert "Use /opcheck 1" in alert
+    assert "Technical price: 2026-08-24" in detail
+    assert "qfq_realtime" in detail and "CSI valuation: 2026-08-23" in detail
+
+
+@pytest.mark.parametrize("write", [record_rule_evaluation, record_rule_alert])
+def test_critical_rule_state_write_propagates_sqlite_failure(monkeypatch, write):
+    def fail(*args, **kwargs):
+        assert kwargs["swallow_errors"] is False
+        raise sqlite3.OperationalError("disk full")
+
+    monkeypatch.setattr("src.opportunity.db_execute", fail)
+    with pytest.raises(sqlite3.OperationalError, match="disk full"):
+        write(1, _snapshot(78, "STRONG"))
+
+
+def test_alert_snapshot_is_a_critical_write(monkeypatch):
+    def fail(*args, **kwargs):
+        assert kwargs["swallow_errors"] is False
+        raise sqlite3.OperationalError("disk full")
+
+    monkeypatch.setattr("src.opportunity.db_execute", fail)
+    with pytest.raises(sqlite3.OperationalError, match="disk full"):
+        save_opportunity_snapshot(_snapshot(78, "STRONG"), alert_sent=True)
 
 
 def test_evaluate_opportunity_is_deterministic_with_supplied_data(monkeypatch):
@@ -135,3 +189,47 @@ def test_unadjusted_etf_fallback_disables_long_term_metrics(monkeypatch):
     assert snapshot.high_52w is None
     assert snapshot.long_term_score == 0
     assert "Adjusted ETF history unavailable" in snapshot.data_notes[0]
+
+
+def test_missing_realtime_adjustment_factor_marks_qfq_fallback_degraded(monkeypatch):
+    history = pd.DataFrame(
+        {"收盘": [100.0] * 300},
+        index=pd.date_range("2025-01-01", periods=300),
+    )
+    history.attrs.update(price_basis="qfq", adjust_factor=None)
+    monkeypatch.setattr(
+        "src.opportunity.get_cached_valuation", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr("src.opportunity._quality", lambda *args: "OK")
+
+    snapshot = asyncio.run(
+        evaluate_opportunity(_rule(), SimpleNamespace(bot_data={}), spot_price=90, hist_df=history)
+    )
+
+    assert snapshot.technical_price_basis == "qfq_history_close"
+    assert snapshot.data_quality == "DEGRADED"
+    assert any("adjustment factor unavailable" in note.lower() for note in snapshot.data_notes)
+
+
+def test_percentile_maturity_requires_observations_and_real_span():
+    short_span = [(date(2024, 1, 1) + timedelta(days=round(i * 1.2 * 365 / 299)), 4.0) for i in range(300)]
+    mature_span = [(date(2024, 1, 1) + timedelta(days=round(i * 2.2 * 365 / 299)), 4.0) for i in range(300)]
+
+    assert _history_maturity(short_span) == pytest.approx((300, 1.2, False), abs=0.01)
+    assert _history_maturity(mature_span) == pytest.approx((300, 2.2, True), abs=0.01)
+
+
+def test_spread_maturity_uses_dates_of_matched_observations():
+    valuation_rows = [
+        {"valuation_date": (date(2024, 1, 1) + timedelta(days=round(i * 1.2 * 365 / 299))).isoformat(), "dividend_yield2": 4.0}
+        for i in range(300)
+    ]
+    bond_rows = [
+        {"yield_date": row["valuation_date"], "cn10y": 1.5}
+        for row in valuation_rows
+    ]
+
+    spreads = _history_spreads(valuation_rows, bond_rows, "股息率2")
+
+    assert len(spreads) == 300
+    assert _history_maturity(spreads)[2] is False

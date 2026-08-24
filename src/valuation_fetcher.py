@@ -26,6 +26,7 @@ VALUATION_FAILURE_CACHE_KEY = "valuation_failure_cache"
 BOND_FAILURE_CACHE_KEY = "bond_failure_cache"
 VALUATION_CACHE_LOCK_KEY = "valuation_cache_lock"
 BOND_CACHE_LOCK_KEY = "bond_cache_lock"
+PROVIDER_FAILURE_COOLDOWN = timedelta(minutes=30)
 
 
 def _now() -> datetime:
@@ -179,6 +180,19 @@ def _cache_is_fresh(entry: Optional[dict], hours: float) -> bool:
     return (_now() - fetched_at).total_seconds() < hours * 3600
 
 
+def _failure_is_fresh(failed_at) -> bool:
+    if not failed_at:
+        return False
+    if isinstance(failed_at, str):
+        try:
+            failed_at = datetime.fromisoformat(failed_at)
+        except ValueError:
+            return False
+    if failed_at.tzinfo is None:
+        failed_at = failed_at.replace(tzinfo=SHANGHAI_TZ)
+    return _now() - failed_at < PROVIDER_FAILURE_COOLDOWN
+
+
 async def get_cached_valuation(benchmark_code: str, bot_data: dict):
     lock = bot_data.setdefault(VALUATION_CACHE_LOCK_KEY, asyncio.Lock())
     async with lock:
@@ -186,9 +200,9 @@ async def get_cached_valuation(benchmark_code: str, bot_data: dict):
         failures = bot_data.setdefault(VALUATION_FAILURE_CACHE_KEY, {})
         latest = get_latest_valuation(code)
         if _cache_is_fresh(latest, VALUATION_CACHE_HOURS):
-            logger.info("[VALUATION] %s 命中持久化缓存，跳过网络请求", code)
+            logger.debug("[VALUATION] %s 命中持久化缓存，跳过网络请求", code)
             return latest
-        if _cache_is_fresh({"fetched_at": failures.get(code)}, VALUATION_CACHE_HOURS):
+        if _failure_is_fresh(failures.get(code)):
             return latest
 
         frame = await fetch_csi_valuation(code)
@@ -322,12 +336,9 @@ async def get_cached_cn10y(bot_data: dict):
     async with lock:
         latest_recent = latest_bond_on_or_before(_now().date(), max_gap_days=7)
         if _cache_is_fresh(latest_recent, BOND_CACHE_HOURS):
-            logger.info("[BOND] 命中持久化缓存，跳过网络请求")
+            logger.debug("[BOND] 命中持久化缓存，跳过网络请求")
             return latest_recent
-        if _cache_is_fresh(
-            {"fetched_at": bot_data.get(BOND_FAILURE_CACHE_KEY)},
-            BOND_CACHE_HOURS,
-        ):
+        if _failure_is_fresh(bot_data.get(BOND_FAILURE_CACHE_KEY)):
             return latest_bond_on_or_before(_now().date(), max_gap_days=36500)
 
         frame, source = await fetch_cn10y()

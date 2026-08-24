@@ -81,6 +81,13 @@ jobs:
           title: "chore: upgrade akshare"
           body: |
             Auto upgrade akshare via CI.
+
+            Checklist:
+            - [ ] Unit tests pass
+            - [ ] `python scripts/verify_data_sources.py` run successfully
+            - [ ] CSI valuation verified
+            - [ ] China 10Y verified
+            - [ ] Adjusted ETF history verified through proxy deployment
           branch: auto-update/akshare
           base: main
           delete-branch: true

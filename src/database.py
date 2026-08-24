@@ -113,6 +113,8 @@ def db_init():
             valuation_date TEXT,
             cn10y_date TEXT,
             cn10y_source TEXT,
+            technical_price_date TEXT,
+            technical_price_basis TEXT,
             alert_sent INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY(rule_id) REFERENCES opportunity_rules(id)
         )''')
@@ -144,6 +146,8 @@ def _ensure_opportunity_snapshot_schema(cursor: sqlite3.Cursor):
         ("valuation_date", "TEXT"),
         ("cn10y_date", "TEXT"),
         ("cn10y_source", "TEXT"),
+        ("technical_price_date", "TEXT"),
+        ("technical_price_basis", "TEXT"),
         ("alert_sent", "INTEGER NOT NULL DEFAULT 0"),
     ):
         if column not in existing:

@@ -15,3 +15,8 @@ services:
     # 挂载卷，实现数据持久化
     volumes:
       - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

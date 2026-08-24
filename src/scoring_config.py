@@ -1,4 +1,8 @@
-"""V1 scoring buckets; keep thresholds in one place."""
+"""V1 scoring buckets; keep thresholds in one place.
+
+Weights and thresholds are intentionally frozen until historical replay is
+reviewed; this PR does not tune scoring.
+"""
 
 MA200_BUCKETS = (
     (">", 0.10, 0),
