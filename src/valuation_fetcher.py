@@ -352,6 +352,15 @@ async def backfill_cn10y() -> int:
         if earliest and earliest["valuation_date"]
         else end_date - timedelta(days=30)
     )
+    earliest_bond = db_execute(
+        "SELECT MIN(yield_date) AS yield_date FROM macro_yield_snapshots",
+        fetchone=True,
+    )
+    if earliest_bond and earliest_bond["yield_date"]:
+        existing_start = date.fromisoformat(earliest_bond["yield_date"])
+        if existing_start <= start_date:
+            return 0
+        end_date = min(end_date, existing_start - timedelta(days=1))
     total = 0
     cursor = start_date
     while cursor <= end_date:
@@ -366,8 +375,3 @@ async def backfill_cn10y() -> int:
             await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
     logger.info("[BOND] 历史回填完成，有效记录 %s 条", total)
     return total
-
-
-def has_bond_history() -> bool:
-    row = db_execute("SELECT 1 FROM macro_yield_snapshots LIMIT 1", fetchone=True)
-    return row is not None

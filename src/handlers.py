@@ -49,7 +49,6 @@ from .opportunity import (
 from .valuation_fetcher import (
     backfill_cn10y,
     get_cached_valuation,
-    has_bond_history,
 )
 
 logger = logging.getLogger(__name__)
@@ -191,9 +190,8 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
             )
             return
 
-        if not has_bond_history():
-            await sent_message.edit_text("已验证估值基准，正在首次建立中国十年期国债收益率本地历史...")
-            await backfill_cn10y()
+        await sent_message.edit_text("已验证估值基准，正在同步所需的中国十年期国债历史...")
+        await backfill_cn10y()
         asset_name = await get_asset_name_with_cache(asset_code, context)
         benchmark_name = str(valuation["benchmark_name"] or benchmark_code)
         now = datetime.now().isoformat()

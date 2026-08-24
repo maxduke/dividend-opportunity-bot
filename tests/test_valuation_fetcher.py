@@ -118,7 +118,11 @@ def test_bond_backfill_starts_seven_days_before_local_valuation(monkeypatch):
     monkeypatch.setattr(
         valuation_fetcher,
         "db_execute",
-        lambda *args, **kwargs: {"valuation_date": "2026-07-27"},
+        lambda query, **kwargs: (
+            {"valuation_date": "2026-07-27"}
+            if "benchmark_valuation_snapshots" in query
+            else {"yield_date": None}
+        ),
     )
     monkeypatch.setattr(
         valuation_fetcher,
@@ -130,6 +134,56 @@ def test_bond_backfill_starts_seven_days_before_local_valuation(monkeypatch):
 
     assert asyncio.run(valuation_fetcher.backfill_cn10y()) == 0
     fetch.assert_awaited_once_with(date(2026, 7, 20), date(2026, 8, 24))
+
+
+def test_bond_backfill_extends_history_for_an_earlier_benchmark(monkeypatch):
+    import asyncio
+    from datetime import date, datetime
+    from unittest.mock import AsyncMock
+
+    from src import valuation_fetcher
+
+    monkeypatch.setattr(
+        valuation_fetcher,
+        "db_execute",
+        lambda query, **kwargs: (
+            {"valuation_date": "2026-07-27"}
+            if "benchmark_valuation_snapshots" in query
+            else {"yield_date": "2026-08-01"}
+        ),
+    )
+    monkeypatch.setattr(
+        valuation_fetcher,
+        "_now",
+        lambda: datetime.fromisoformat("2026-08-24T14:50:00+08:00"),
+    )
+    fetch = AsyncMock(return_value=None)
+    monkeypatch.setattr(valuation_fetcher, "_fetch_primary_bond", fetch)
+
+    assert asyncio.run(valuation_fetcher.backfill_cn10y()) == 0
+    fetch.assert_awaited_once_with(date(2026, 7, 20), date(2026, 7, 31))
+
+
+def test_bond_backfill_skips_network_when_history_already_covers_valuation(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from src import valuation_fetcher
+
+    monkeypatch.setattr(
+        valuation_fetcher,
+        "db_execute",
+        lambda query, **kwargs: (
+            {"valuation_date": "2026-07-27"}
+            if "benchmark_valuation_snapshots" in query
+            else {"yield_date": "2026-07-20"}
+        ),
+    )
+    fetch = AsyncMock(side_effect=AssertionError("covered history must not refetch"))
+    monkeypatch.setattr(valuation_fetcher, "_fetch_primary_bond", fetch)
+
+    assert asyncio.run(valuation_fetcher.backfill_cn10y()) == 0
+    fetch.assert_not_awaited()
 
 
 def test_sina_fallback_does_not_overwrite_chinabond(monkeypatch, tmp_path):
