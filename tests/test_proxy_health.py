@@ -84,6 +84,27 @@ def test_http_failure_and_timeout_are_unverified(monkeypatch):
     assert proxy_health.check_proxy_balance(force=True).state == proxy_health.UNVERIFIED
 
 
+@pytest.mark.parametrize(
+    ("status_code", "expected_state"),
+    [
+        (401, "NO_BALANCE_OR_INVALID"),
+        (403, "NO_BALANCE_OR_INVALID"),
+        (408, "UNVERIFIED"),
+        (429, "UNVERIFIED"),
+    ],
+)
+def test_http_4xx_state_matrix(monkeypatch, status_code, expected_state):
+    from src import proxy_health
+
+    monkeypatch.setattr(proxy_health, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    monkeypatch.setattr(
+        proxy_health.requests,
+        "get",
+        lambda *args, **kwargs: _response({}, status_code=status_code),
+    )
+    assert proxy_health.check_proxy_balance(force=True).state == expected_state
+
+
 def test_malformed_json_is_unverified(monkeypatch):
     from src import proxy_health
 

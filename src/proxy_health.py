@@ -92,9 +92,9 @@ def _fetch_balance(auth_ip: str, auth_token: str, checked_at: datetime) -> Proxy
             timeout=_BALANCE_TIMEOUT_SECONDS,
         )
         status_code = response.status_code
-        if 400 <= status_code < 500:
+        if status_code in {401, 403}:
             return _status(NO_BALANCE_OR_INVALID, checked_at, reason="http_status")
-        if status_code >= 500 or status_code != 200:
+        if status_code != 200:
             return _status(UNVERIFIED, checked_at, reason="http_status")
 
         payload = response.json()
