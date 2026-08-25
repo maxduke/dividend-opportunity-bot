@@ -14,6 +14,10 @@ build/
 # 数据库文件
 *.db
 /data/
+research/data/
+research/cache/
+research/output/
+*.xueqiu-cookie
 
 # 环境变量文件 (非常重要!)
 .env

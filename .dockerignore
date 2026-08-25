@@ -7,5 +7,9 @@ __pycache__
 data
 docs
 tests
+research/cache
+research/data
+research/output
+*.xueqiu-cookie
 *.db
 *.log

@@ -1,0 +1,7 @@
+FROM ghcr.io/maxduke/dividend-opportunity-bot:latest
+
+COPY --chown=appuser:appuser research/ ./research/
+COPY --chown=appuser:appuser scripts/research_csi_dp2.py ./scripts/research_csi_dp2.py
+
+ENTRYPOINT ["python", "scripts/research_csi_dp2.py"]
+CMD ["--help"]
