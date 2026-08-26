@@ -169,6 +169,9 @@ def test_detail_request_error_opens_circuit_and_report_still_generates(tmp_path,
 
     assert decision == "NOT_ELIGIBLE_FOR_BACKFILL"
     assert output_dir.joinpath("validation-report.json").exists()
+    report = json.loads(output_dir.joinpath("validation-report.json").read_text())
+    assert "TECHNICAL_COMPLETENESS" in report["eligibility"]["failed_gates"]
+    assert report["eligibility"]["decision"] == "NOT_ELIGIBLE_FOR_BACKFILL"
     assert detail_calls == ["first"]
     assert "HTTP 403" in caplog.text
     assert "remaining detail requests skipped" in caplog.text

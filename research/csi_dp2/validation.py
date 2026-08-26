@@ -474,6 +474,7 @@ def evaluate_eligibility(
     direct_csi: Any = None,
     direct_check_requested: bool = False,
     checkpoints: Iterable[Mapping[str, Any]] = CHECKPOINTS,
+    analysis_complete: bool = True,
 ) -> dict[str, Any]:
     rows = list(observations)
     deduplicated = deduplicated or deduplicate_observations(rows)
@@ -552,6 +553,10 @@ def evaluate_eligibility(
         failed.append("H_max_gap")
         reasons.append(f"Maximum HIGH-confidence missing session run is {high_max_gap}; required <=20.")
 
+    if not analysis_complete:
+        failed.append("TECHNICAL_COMPLETENESS")
+        reasons.append("Detail retrieval stopped after a persistent transient error; rerun after cooldown.")
+
     decision = "ELIGIBLE_FOR_BACKFILL" if not failed else "NOT_ELIGIBLE_FOR_BACKFILL"
     return {
         "decision": decision,
@@ -597,6 +602,7 @@ def validate_archive(
     direct_check_requested: bool = False,
     checkpoints: Iterable[Mapping[str, Any]] = CHECKPOINTS,
     parse_failures: Iterable[Any] = (),
+    analysis_complete: bool = True,
 ) -> ValidationResult:
     rows = tuple(observations)
     checkpoints = tuple(checkpoints)
@@ -614,5 +620,6 @@ def validate_archive(
         direct_csi=direct_csi,
         direct_check_requested=direct_check_requested,
         checkpoints=checkpoints,
+        analysis_complete=analysis_complete,
     )
     return ValidationResult(rows, deduplicated, coverage, overlap, checkpoints_result, eligibility, tuple(parse_failures))

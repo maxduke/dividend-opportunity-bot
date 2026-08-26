@@ -174,6 +174,7 @@ def run(args: argparse.Namespace) -> tuple[str, Path]:
         direct_csi=direct_csi,
         direct_check_requested=args.direct_csi_check,
         parse_failures=failures,
+        analysis_complete=not detail_circuit_open,
     )
     write_reports(
         output_dir,
