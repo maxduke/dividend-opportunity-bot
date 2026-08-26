@@ -144,6 +144,19 @@ def test_detail_merge_and_detail_request_decision():
     assert parse_post(merged).dividend_yield == 4.36
 
 
+def test_complete_generic_yield_comment_does_not_request_detail():
+    raw = post(
+        "$中证红利(SH000922)$ 目前指数最新股息率5.48%，资金仍在流入",
+        created_at="2026-06-28T08:00:00+08:00",
+    )
+
+    assert is_candidate_post(raw)
+    assert not needs_detail_request(raw)
+    parsed = parse_post(raw)
+    assert isinstance(parsed, ParseFailure)
+    assert parsed.reason == "missing_valuation_date"
+
+
 def test_post_publication_timestamp_is_shanghai_for_epoch_seconds():
     raw = timeline_item_to_raw_post(
         {"id": "epoch", "created_at": 1784419200, "text": "000922 中证红利"}

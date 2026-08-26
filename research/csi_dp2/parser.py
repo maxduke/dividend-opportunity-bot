@@ -42,6 +42,10 @@ _TARGET_NAME_RE = re.compile(r"中证红利(?!质量|低波|100|增强|价值|�
 _TARGET_INDEX_RE = re.compile(r"中证红利指数(?!质量|低波|100|增强|价值|成长)")
 _INDEX_CODE_RE = re.compile(r"(?<!\d)\d{6}(?!\d)")
 _RELEVANT_RE = re.compile(r"中证红利指数每日股息率速递|中证红利|股息率|D\s*/?\s*P\s*2|计算用股本", re.IGNORECASE)
+_DETAIL_OBSERVATION_RE = re.compile(
+    r"中证红利指数每日股息率速递|每日股息率速递|中证指数官网|截至",
+    re.IGNORECASE,
+)
 
 _DATE_RE = re.compile(
     r"截至\s*"
@@ -253,6 +257,11 @@ def needs_detail_request(
     if not is_relevant_post(text) or not is_candidate_post(
         post, benchmark_code=benchmark_code, benchmark_name=benchmark_name
     ):
+        return False
+    # A complete generic comment mentioning the index and a current yield is
+    # a parse failure, not a reason to probe the detail endpoint.  Reserve
+    # detail requests for posts that actually resemble the dated daily series.
+    if not _DETAIL_OBSERVATION_RE.search(text):
         return False
     valuation_date, _, date_error = _resolve_valuation_date(text, post.created_at)
     values, _ = _yield_candidates(text)
