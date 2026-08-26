@@ -44,7 +44,9 @@ def test_check_job_skips_overlapping_run(monkeypatch):
     runner.assert_awaited_once()
 
 
-def test_daily_briefing_stops_before_provider_access_without_subscribers(monkeypatch):
+def test_daily_briefing_stops_before_provider_access_without_subscribers(
+    monkeypatch, mock_calendar_preload
+):
     from src import jobs
 
     monkeypatch.setattr(jobs, "is_trading_day", lambda now: True)
@@ -53,6 +55,7 @@ def test_daily_briefing_stops_before_provider_access_without_subscribers(monkeyp
     monkeypatch.setattr(jobs, "_fetch_all_realtime_quotes", provider)
 
     asyncio.run(jobs.daily_briefing_job(SimpleNamespace(bot_data={})))
+    mock_calendar_preload.assert_awaited_once()
     provider.assert_not_awaited()
 
 

@@ -123,7 +123,9 @@ def test_alert_snapshot_is_a_critical_write(monkeypatch):
         save_opportunity_snapshot(_snapshot(78, "STRONG"), alert_sent=True)
 
 
-def test_evaluate_opportunity_is_deterministic_with_supplied_data(monkeypatch):
+def test_evaluate_opportunity_is_deterministic_with_supplied_data(
+    monkeypatch, mock_calendar_preload
+):
     dates = pd.date_range("2025-08-01", periods=300, freq="D")
     history = pd.DataFrame({"收盘": [100 + i * 0.01 for i in range(300)]}, index=dates)
     rule = _rule()
@@ -143,6 +145,7 @@ def test_evaluate_opportunity_is_deterministic_with_supplied_data(monkeypatch):
     monkeypatch.setattr("src.opportunity.get_bond_history", lambda *args, **kwargs: [bond])
     first = asyncio.run(evaluate_opportunity(rule, context, spot_price=102, hist_df=history))
     second = asyncio.run(evaluate_opportunity(rule, context, spot_price=102, hist_df=history))
+    assert mock_calendar_preload.await_count == 2
     assert first.total_score == second.total_score
     assert first.dividend_bond_spread == pytest.approx(3.4)
     assert 0 <= first.total_score <= 100

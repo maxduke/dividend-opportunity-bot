@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import asyncio
 import logging
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -7,6 +8,8 @@ from zoneinfo import ZoneInfo
 import akshare as ak
 import pandas as pd
 import pandas_market_calendars as mcal
+
+from .config import AKSHARE_CALL_TIMEOUT_SECONDS
 
 CHINA_CALENDAR = mcal.get_calendar("XSHG")
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
@@ -17,6 +20,8 @@ LOCAL_CALENDAR_COVERAGE_START = _LOCAL_HOLIDAYS.min().date()
 LOCAL_CALENDAR_COVERAGE_END = _LOCAL_HOLIDAYS.max().date()
 CALENDAR_FAILURE_RETRY = timedelta(minutes=1)
 _trade_day_cache = {"days": None, "loaded_on": None, "failed_at": None}
+_trade_day_refresh_lock = asyncio.Lock()
+_trade_day_refresh_task = None
 
 
 def _load_trade_days_from_ak() -> set | None:
@@ -33,6 +38,55 @@ def _load_trade_days_from_ak() -> set | None:
         return None
 
 
+def _calendar_refresh_due(now: datetime) -> bool:
+    failed_at = _trade_day_cache.get("failed_at")
+    return (
+        _trade_day_cache.get("loaded_on") != now.date()
+        and (failed_at is None or now - failed_at >= CALENDAR_FAILURE_RETRY)
+    )
+
+
+async def ensure_trade_days_loaded(check_date: datetime | None = None) -> None:
+    """Refresh the provider calendar without blocking the event loop."""
+    global _trade_day_refresh_task
+
+    target = check_date or datetime.now(SHANGHAI_TZ)
+    cn_date = target.astimezone(SHANGHAI_TZ).date() if target.tzinfo else target.date()
+    if LOCAL_CALENDAR_COVERAGE_START <= cn_date <= LOCAL_CALENDAR_COVERAGE_END:
+        return
+
+    now = datetime.now(SHANGHAI_TZ)
+    if not _calendar_refresh_due(now):
+        return
+    async with _trade_day_refresh_lock:
+        now = datetime.now(SHANGHAI_TZ)
+        if not _calendar_refresh_due(now):
+            return
+        if _trade_day_refresh_task is None:
+            _trade_day_refresh_task = asyncio.create_task(
+                asyncio.to_thread(_load_trade_days_from_ak)
+            )
+        try:
+            trade_days = await asyncio.wait_for(
+                asyncio.shield(_trade_day_refresh_task),
+                timeout=AKSHARE_CALL_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("交易日历加载超时(%ss)", AKSHARE_CALL_TIMEOUT_SECONDS)
+            trade_days = None
+        except Exception as exc:
+            logger.warning("异步加载交易日历失败: %s", exc)
+            trade_days = None
+        if _trade_day_refresh_task.done():
+            _trade_day_refresh_task = None
+        if trade_days is None:
+            _trade_day_cache["failed_at"] = now
+        else:
+            _trade_day_cache["days"] = trade_days
+            _trade_day_cache["loaded_on"] = now.date()
+            _trade_day_cache["failed_at"] = None
+
+
 def is_trading_day(check_date: datetime) -> bool:
     cn_date = check_date.date()
     if cn_date.weekday() >= 5:
@@ -41,9 +95,13 @@ def is_trading_day(check_date: datetime) -> bool:
         return not CHINA_CALENDAR.valid_days(start_date=cn_date, end_date=cn_date).empty
 
     now = datetime.now(SHANGHAI_TZ)
-    failed_at = _trade_day_cache.get("failed_at")
-    retry_due = failed_at is None or now - failed_at >= CALENDAR_FAILURE_RETRY
-    if _trade_day_cache.get("loaded_on") != now.date() and retry_due:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        running_async_context = False
+    else:
+        running_async_context = True
+    if not running_async_context and _calendar_refresh_due(now):
         trade_days = _load_trade_days_from_ak()
         if trade_days is None:
             _trade_day_cache["failed_at"] = now

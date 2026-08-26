@@ -587,30 +587,34 @@ async def get_history_data_cached(
 ) -> Union[pd.DataFrame, None]:
     """Share one daily history attempt across jobs and commands."""
     current = now or datetime.now(SHANGHAI_TZ)
-    cache = ensure_daily_history_cache(context, current)
-    cached = cache.get(asset_code)
-    if runtime_history_is_usable(cached, days, current):
-        return cached
-    if history_failure_is_fresh(context, asset_code, current):
-        return cached
+    locks = context.bot_data.setdefault("hist_data_locks", {})
+    lock = locks.setdefault(asset_code, asyncio.Lock())
+    async with lock:
+        # Re-check after waiting: another caller may have populated the cache.
+        cache = ensure_daily_history_cache(context, current)
+        cached = cache.get(asset_code)
+        if runtime_history_is_usable(cached, days, current):
+            return cached
+        if history_failure_is_fresh(context, asset_code, current):
+            return cached
 
-    fetched = await get_history_data(asset_code, days)
-    bot = getattr(context, "bot", None)
-    if bot is not None:
-        await notify_proxy_health(bot)
-    failures = context.bot_data.setdefault(KEY_HIST_FAILURE_CACHE, {})
-    if fetched is None or fetched.empty:
-        failures[asset_code] = current
-        return cached
+        fetched = await get_history_data(asset_code, days)
+        bot = getattr(context, "bot", None)
+        if bot is not None:
+            await notify_proxy_health(bot)
+        failures = context.bot_data.setdefault(KEY_HIST_FAILURE_CACHE, {})
+        if fetched is None or fetched.empty:
+            failures[asset_code] = current
+            return cached
 
-    cache[asset_code] = fetched
-    if runtime_history_is_usable(fetched, days, current):
-        failures.pop(asset_code, None)
-    else:
-        # Retain degraded history for display, but keep technical scoring off
-        # and avoid another paid attempt until the cooldown expires.
-        failures[asset_code] = current
-    return fetched
+        cache[asset_code] = fetched
+        if runtime_history_is_usable(fetched, days, current):
+            failures.pop(asset_code, None)
+        else:
+            # Retain degraded history for display, but keep technical scoring off
+            # and avoid another paid attempt until the cooldown expires.
+            failures[asset_code] = current
+        return fetched
 
 
 # --- 实时价格获取 ---
