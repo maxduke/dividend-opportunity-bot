@@ -108,7 +108,13 @@ def test_addop_initial_snapshot_is_critical(monkeypatch):
         effective_user=SimpleNamespace(id=9),
         message=SimpleNamespace(reply_text=reply),
     )
-    context = SimpleNamespace(args=["510300", "000922"], bot_data={})
+    context = SimpleNamespace(
+        args=["510300", "000922"],
+        bot_data={
+            "quote_failure_counts": {"510300": 2},
+            "quote_failure_notification_sent": {"510300": True},
+        },
+    )
     db_results = iter([None, {"id": 7}])
     snapshot = SimpleNamespace(total_score=72, level="STRONG")
     save = Mock()
@@ -140,3 +146,5 @@ def test_addop_initial_snapshot_is_critical(monkeypatch):
     asyncio.run(handlers.add_opportunity_rule_command.__wrapped__(update, context))
 
     save.assert_called_once_with(snapshot, critical=True)
+    assert context.bot_data["quote_failure_counts"] == {}
+    assert context.bot_data["quote_failure_notification_sent"] == {}
