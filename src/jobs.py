@@ -37,7 +37,7 @@ from .data_fetcher import (
     runtime_history_is_usable,
 )
 from .database import db_execute
-from .market import is_market_hours, is_trading_day
+from .market import ensure_trade_days_loaded, is_market_hours, is_trading_day
 from .opportunity import (
     evaluate_opportunity,
     format_opportunity_alert,
@@ -84,6 +84,7 @@ async def check_opportunity_job(context: ContextTypes.DEFAULT_TYPE):
 async def _check_opportunity_job(context: ContextTypes.DEFAULT_TYPE):
     if not ENABLE_INTRADAY_MONITOR:
         return
+    await ensure_trade_days_loaded()
     if not is_market_hours():
         return
 
@@ -179,6 +180,7 @@ async def _evaluate_opportunity_rules(context, rules, quotes, history, now):
 
 async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(SHANGHAI_TZ)
+    await ensure_trade_days_loaded(now)
     if not is_trading_day(now):
         logger.info("今天 (%s) 非交易日，跳过每日简报。", now.strftime("%Y-%m-%d"))
         return

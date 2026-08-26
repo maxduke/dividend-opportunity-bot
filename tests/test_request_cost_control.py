@@ -231,6 +231,47 @@ def test_raw_fallback_cooldown_skips_provider_call(monkeypatch):
     fetch.assert_awaited_once()
 
 
+def test_history_cache_single_flight_for_same_asset(monkeypatch):
+    from src import data_fetcher
+
+    now = datetime.fromisoformat("2026-08-24T10:00:00+08:00")
+    history = pd.DataFrame(
+        {"收盘": [100.0] * 300},
+        index=pd.date_range("2025-01-01", periods=300),
+    )
+    history.attrs.update(
+        technical_history_days=550,
+        price_basis="qfq",
+        price_basis_asof="2026-08-24",
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fetch(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return history
+
+    fetch_mock = AsyncMock(side_effect=fetch)
+    monkeypatch.setattr(data_fetcher, "get_history_data", fetch_mock)
+    context = SimpleNamespace(bot_data={})
+
+    async def exercise():
+        first = asyncio.create_task(
+            data_fetcher.get_history_data_cached(context, "510300", 550, now)
+        )
+        await entered.wait()
+        second = asyncio.create_task(
+            data_fetcher.get_history_data_cached(context, "510300", 550, now)
+        )
+        release.set()
+        return await asyncio.gather(first, second)
+
+    first, second = asyncio.run(exercise())
+    assert first is history and second is history
+    fetch_mock.assert_awaited_once()
+
+
 def test_qfq_retry_replaces_raw_fallback_and_clears_failure(monkeypatch):
     from src import data_fetcher
 

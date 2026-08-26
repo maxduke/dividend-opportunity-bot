@@ -37,7 +37,7 @@ from .data_fetcher import (
     runtime_history_is_usable,
 )
 from .database import db_execute
-from .market import trading_sessions_elapsed
+from .market import ensure_trade_days_loaded, trading_sessions_elapsed
 from .metrics import (
     calculate_52w_drawdown,
     calculate_52w_high,
@@ -230,6 +230,7 @@ async def evaluate_opportunity(
 ) -> OpportunitySnapshot:
     """Evaluate one rule; network data is supplied by shared caches where possible."""
     now = _now()
+    await ensure_trade_days_loaded(now)
     bot_data = context.bot_data
     asset_code = str(rule["asset_code"])
     benchmark_code = str(rule["benchmark_code"])
