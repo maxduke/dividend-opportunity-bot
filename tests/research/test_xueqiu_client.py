@@ -158,7 +158,7 @@ def test_not_found_detail_is_permanent_and_not_retried(tmp_path):
     assert sleeps == []
 
 
-@pytest.mark.parametrize("status", [400, 404, 405, 410])
+@pytest.mark.parametrize("status", [400, 404, 410])
 def test_detail_permanent_statuses_are_negative_cached(tmp_path, status):
     session = Session([Response(status)])
     xueqiu, _ = client(tmp_path, session)

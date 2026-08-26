@@ -445,7 +445,7 @@ class XueqiuClient:
             offline=use_offline,
             refresh=use_refresh,
             not_found_path=self._detail_not_found_path(normalized_id),
-            permanent_not_found_statuses=frozenset({400, 404, 405, 410}),
+            permanent_not_found_statuses=frozenset({400, 404, 410}),
         )
 
     def close(self) -> None:
