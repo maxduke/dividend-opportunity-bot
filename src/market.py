@@ -21,6 +21,7 @@ LOCAL_CALENDAR_COVERAGE_END = _LOCAL_HOLIDAYS.max().date()
 CALENDAR_FAILURE_RETRY = timedelta(minutes=1)
 _trade_day_cache = {"days": None, "loaded_on": None, "failed_at": None}
 _trade_day_refresh_lock = asyncio.Lock()
+_trade_day_refresh_task = None
 
 
 def _load_trade_days_from_ak() -> set | None:
@@ -47,6 +48,8 @@ def _calendar_refresh_due(now: datetime) -> bool:
 
 async def ensure_trade_days_loaded(check_date: datetime | None = None) -> None:
     """Refresh the provider calendar without blocking the event loop."""
+    global _trade_day_refresh_task
+
     target = check_date or datetime.now(SHANGHAI_TZ)
     cn_date = target.astimezone(SHANGHAI_TZ).date() if target.tzinfo else target.date()
     if LOCAL_CALENDAR_COVERAGE_START <= cn_date <= LOCAL_CALENDAR_COVERAGE_END:
@@ -59,9 +62,13 @@ async def ensure_trade_days_loaded(check_date: datetime | None = None) -> None:
         now = datetime.now(SHANGHAI_TZ)
         if not _calendar_refresh_due(now):
             return
+        if _trade_day_refresh_task is None:
+            _trade_day_refresh_task = asyncio.create_task(
+                asyncio.to_thread(_load_trade_days_from_ak)
+            )
         try:
             trade_days = await asyncio.wait_for(
-                asyncio.to_thread(_load_trade_days_from_ak),
+                asyncio.shield(_trade_day_refresh_task),
                 timeout=AKSHARE_CALL_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
@@ -70,6 +77,8 @@ async def ensure_trade_days_loaded(check_date: datetime | None = None) -> None:
         except Exception as exc:
             logger.warning("异步加载交易日历失败: %s", exc)
             trade_days = None
+        if _trade_day_refresh_task.done():
+            _trade_day_refresh_task = None
         if trade_days is None:
             _trade_day_cache["failed_at"] = now
         else:

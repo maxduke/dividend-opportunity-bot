@@ -86,6 +86,7 @@ def test_async_calendar_preload_is_single_flight(monkeypatch):
         "_trade_day_cache",
         {"days": None, "loaded_on": None, "failed_at": None},
     )
+    monkeypatch.setattr(market, "_trade_day_refresh_task", None)
     monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
 
     async def check():
@@ -109,6 +110,7 @@ def test_async_calendar_preload_loads_out_of_range_weekend(monkeypatch):
         "_trade_day_cache",
         {"days": None, "loaded_on": None, "failed_at": None},
     )
+    monkeypatch.setattr(market, "_trade_day_refresh_task", None)
     monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
 
     asyncio.run(market.ensure_trade_days_loaded(check_date))
@@ -116,14 +118,18 @@ def test_async_calendar_preload_loads_out_of_range_weekend(monkeypatch):
     provider.assert_called_once()
 
 
-def test_async_calendar_preload_times_out_without_blocking(monkeypatch):
+def test_timed_out_calendar_preload_reuses_in_flight_task(monkeypatch):
     import asyncio
 
     check_date = datetime(2026, 8, 24, tzinfo=ZoneInfo("Asia/Shanghai"))
-    never_finishes = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
 
     async def blocked_call(*args, **kwargs):
-        await never_finishes.wait()
+        nonlocal calls
+        calls += 1
+        await release.wait()
+        return {check_date.date()}
 
     monkeypatch.setattr(asyncio, "to_thread", blocked_call)
     monkeypatch.setattr(market, "AKSHARE_CALL_TIMEOUT_SECONDS", 0.01)
@@ -132,11 +138,22 @@ def test_async_calendar_preload_times_out_without_blocking(monkeypatch):
         "_trade_day_cache",
         {"days": None, "loaded_on": None, "failed_at": None},
     )
+    monkeypatch.setattr(market, "_trade_day_refresh_task", None)
     monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
 
-    asyncio.run(market.ensure_trade_days_loaded(check_date))
+    async def check():
+        await market.ensure_trade_days_loaded(check_date)
+        market._trade_day_cache["failed_at"] -= market.CALENDAR_FAILURE_RETRY
+        await market.ensure_trade_days_loaded(check_date)
+        assert calls == 1
+        release.set()
+        await asyncio.sleep(0)
+        market._trade_day_cache["failed_at"] -= market.CALENDAR_FAILURE_RETRY
+        await market.ensure_trade_days_loaded(check_date)
 
-    assert market._trade_day_cache["failed_at"] is not None
+    asyncio.run(check())
+    assert market._trade_day_cache["days"] == {check_date.date()}
+    assert market._trade_day_refresh_task is None
 
 
 def test_trading_sessions_elapsed_skips_national_day_holiday():
