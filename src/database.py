@@ -181,8 +181,18 @@ def _ensure_opportunity_snapshot_schema(cursor: sqlite3.Cursor):
             cursor.execute(f"ALTER TABLE opportunity_snapshots ADD COLUMN {column} {definition}")
 
 
+def _rollback(conn):
+    if conn is None:
+        return
+    try:
+        conn.rollback()
+    except sqlite3.Error as exc:
+        logger.error("数据库回滚失败: %s", exc)
+
+
 def db_execute(query, params=(), fetchone=False, fetchall=False, swallow_errors=True):
     with _lock:
+        conn = None
         try:
             conn = _get_connection()
             cursor = conn.cursor()
@@ -194,6 +204,7 @@ def db_execute(query, params=(), fetchone=False, fetchall=False, swallow_errors=
                 return cursor.fetchall()
             return None
         except sqlite3.Error as e:
+            _rollback(conn)
             logger.error(f"数据库操作失败: {e} | query={query}")
             if not swallow_errors:
                 raise
@@ -203,12 +214,15 @@ def db_execute(query, params=(), fetchone=False, fetchall=False, swallow_errors=
 def db_executemany(query, params_list):
     """Execute a batch under the same SQLite lock and transaction."""
     with _lock:
+        conn = None
         try:
             conn = _get_connection()
             conn.executemany(query, params_list)
             conn.commit()
         except sqlite3.Error as e:
+            _rollback(conn)
             logger.error(f"数据库批量操作失败: {e} | query={query}")
+            raise
 
 
 # --- 白名单操作 ---
@@ -217,8 +231,16 @@ def is_whitelisted(user_id: int) -> bool:
 
 
 def add_to_whitelist(user_id: int):
-    db_execute("INSERT OR IGNORE INTO whitelist (user_id) VALUES (?)", (user_id,))
+    db_execute(
+        "INSERT OR IGNORE INTO whitelist (user_id) VALUES (?)",
+        (user_id,),
+        swallow_errors=False,
+    )
 
 
 def remove_from_whitelist(user_id: int):
-    db_execute("DELETE FROM whitelist WHERE user_id = ?", (user_id,))
+    db_execute(
+        "DELETE FROM whitelist WHERE user_id = ?",
+        (user_id,),
+        swallow_errors=False,
+    )
