@@ -75,6 +75,42 @@ KEY_FAILURE_SENT = 'failure_notification_sent'
 STOCK_PREFIXES = ('0', '3', '6', '4', '8')
 ETF_PREFIXES = ('5', '1')
 
+# Telegram 展示层标签；数据库和评分逻辑继续使用英文机器值。
+OPPORTUNITY_LEVEL_LABELS = {
+    'NEUTRAL': '中性',
+    'WATCH': '关注',
+    'MODERATE': '中等机会',
+    'STRONG': '较强机会',
+    'RARE': '稀有机会',
+}
+SCORING_MODE_LABELS = {
+    'NONE': '不可评分',
+    'PERCENTILE': '历史分位',
+    'ABSOLUTE_FALLBACK': '绝对值回退',
+    'MIXED': '混合模式',
+}
+DATA_QUALITY_LABELS = {
+    'OK': '正常',
+    'DEGRADED': '降级',
+    'VALUATION_UNAVAILABLE': '估值不可用',
+    'STALE_VALUATION': '估值过期',
+    'BOND_YIELD_UNAVAILABLE': '国债收益率不可用',
+    'INSUFFICIENT_TECHNICAL_HISTORY': '技术历史数据不足',
+    'INSUFFICIENT_VALUATION_HISTORY': '估值历史数据不足',
+}
+TECHNICAL_BASIS_LABELS = {
+    'unavailable': '不可用',
+    'qfq_realtime': '前复权实时价（qfq）',
+    'qfq_history_close': '前复权历史收盘价（qfq）',
+}
+PROXY_STATE_LABELS = {
+    'DISABLED': '未启用',
+    'POSITIVE': '余额充足',
+    'NO_BALANCE_OR_INVALID': '余额不足或 Token 无效',
+    'UNVERIFIED': '无法验证',
+    'LOW_BALANCE': '余额偏低',
+}
+
 
 def validate_config():
     """验证关键配置值的合法性，不合法则退出。"""

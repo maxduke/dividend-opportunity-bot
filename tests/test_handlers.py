@@ -25,9 +25,27 @@ def test_refresh_clears_history_cache_failure_state_and_date():
     assert context.bot_data[KEY_CACHE_DATE] is None
 
 
+def test_addop_rejects_unsupported_asset_before_network(monkeypatch):
+    from src import handlers
+
+    reply = AsyncMock()
+    quote = AsyncMock(side_effect=AssertionError("unsupported asset must stop first"))
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=9),
+        message=SimpleNamespace(reply_text=reply),
+    )
+    context = SimpleNamespace(args=["900001", "000922", "60"], bot_data={})
+    monkeypatch.setattr(handlers, "_fetch_single_realtime_quote", quote)
+
+    asyncio.run(handlers.add_opportunity_rule_command.__wrapped__(update, context))
+
+    assert "不支持资产代码 900001" in reply.await_args.args[0]
+    quote.assert_not_awaited()
+
+
 def test_proxy_status_refresh_requires_restart_without_hot_install(monkeypatch):
     from src import handlers
-    from src.proxy_health import POSITIVE, ProxyBalanceStatus
+    from src.proxy_health import LOW_BALANCE, POSITIVE, ProxyBalanceStatus
 
     reply = AsyncMock()
     update = SimpleNamespace(message=SimpleNamespace(reply_text=reply))
@@ -43,13 +61,15 @@ def test_proxy_status_refresh_requires_restart_without_hot_install(monkeypatch):
     monkeypatch.setattr(handlers, "ENABLE_AKSHARE_PROXY_PATCH", True)
     monkeypatch.setattr(handlers, "check_proxy_balance_async", AsyncMock(return_value=status))
     monkeypatch.setattr(handlers, "notify_proxy_health", AsyncMock(return_value=False))
+    monkeypatch.setattr(handlers, "proxy_health_category", lambda _: LOW_BALANCE)
     monkeypatch.setattr(handlers, "proxy_patch_active", lambda: False)
 
     asyncio.run(handlers.proxy_status_command.__wrapped__(update, context))
 
     handlers.check_proxy_balance_async.assert_awaited_once_with(force=True)
     text = reply.await_args.args[0]
-    assert "Balance: 382" in text
-    assert "Patch active: NO" in text
-    assert "Restart the bot to activate it safely." in text
+    assert "余额：382" in text
+    assert "余额状态：余额偏低" in text
+    assert "补丁已启用：否" in text
+    assert "请重启 Bot 以安全启用。" in text
     assert "secret-token" not in text

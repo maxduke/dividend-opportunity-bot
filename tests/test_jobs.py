@@ -157,9 +157,9 @@ def test_daily_briefing_keeps_degraded_banner_and_rule_details(monkeypatch):
     asyncio.run(jobs.daily_briefing_job(context))
 
     text = send_message.await_args.kwargs["text"]
-    assert "Technical data degraded for one or more assets." in text
-    assert "Data: <code>DEGRADED</code>" in text
-    assert "Technical: unavailable" in text
+    assert "一个或多个资产的技术数据已降级" in text
+    assert "数据：<code>降级</code>" in text
+    assert "技术数据：不可用" in text
 
 
 def test_intraday_registration_disabled():

@@ -19,13 +19,17 @@ from .config import (
     BRIEFING_TIMES_STR,
     CSI_DIVIDEND_YIELD_FIELD,
     ENABLE_AKSHARE_PROXY_PATCH,
+    ETF_PREFIXES,
     KEY_CACHE_DATE,
     KEY_HIST_CACHE,
     KEY_HIST_FAILURE_CACHE,
     OPPORTUNITY_ALERT_THRESHOLD,
+    OPPORTUNITY_LEVEL_LABELS,
     PRICE_ADJUSTMENT,
+    PROXY_STATE_LABELS,
     REQUEST_INTERVAL_SECONDS,
     RSI_PERIOD,
+    STOCK_PREFIXES,
     TECHNICAL_HISTORY_DAYS,
 )
 from .data_fetcher import (
@@ -50,6 +54,7 @@ from .proxy_health import (
     check_proxy_balance_async,
     next_balance_retry_at,
     notify_proxy_health,
+    proxy_health_category,
     proxy_patch_active,
 )
 from .valuation_fetcher import backfill_cn10y, get_cached_valuation
@@ -100,27 +105,27 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     briefing_status = "开启" if row and row["daily_briefing_enabled"] else "关闭"
     help_text = f"""
-<b>可用命令:</b>
+<b>可用命令：</b>
 
 <b>每日简报</b>
 /briefing <code>on|off</code> - 开/关您的每日简报 (您当前: <b>{briefing_status}</b>)
 
 <b>红利机会监控</b>
-/addop <code>ASSET BENCHMARK [MIN_SCORE]</code> - 添加机会监控
+/addop <code>资产代码 估值基准代码 [最低评分]</code> - 添加机会监控
 /delop <code>ID</code> - 删除机会监控
 /oplist - 查看机会监控
 /opon <code>ID</code> / /opoff <code>ID</code> - 开关机会监控
 /opcheck [ID] - 查询机会分数明细
 
-<b>白名单管理 (仅限管理员)</b>
+<b>白名单管理（仅限管理员）</b>
 /add_w <code>ID</code> - 添加用户
 /del_w <code>ID</code> - 移除用户
 /list_w - 查看白名单
 /refresh - 清空历史数据缓存
 /proxy_status [refresh] - 查看 AKShare Proxy 状态
 
-<b>全局配置:</b>
-- RSI6 周期（Opportunity 战术因子）: <b>{RSI_PERIOD}</b>
+<b>全局配置：</b>
+- RSI6 周期（红利机会战术因子）：<b>{RSI_PERIOD}</b>
 - 技术价格: <b>{PRICE_ADJUSTMENT}</b>
 - 请求间隔: <b>{REQUEST_INTERVAL_SECONDS}秒</b>
 - 每日简报: <b>{BRIEFING_TIMES_STR}</b>
@@ -136,14 +141,14 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
     try:
         if len(context.args) not in (2, 3):
             await update.message.reply_text(
-                "命令格式错误。\n正确格式: /addop <asset_code> <benchmark_code> [min_score]"
+                "命令格式错误。\n正确格式：/addop <资产代码> <估值基准代码> [最低评分]"
             )
             return
         asset_code, benchmark_code = context.args[:2]
         benchmark_code = benchmark_code.upper()
         min_score = float(context.args[2]) if len(context.args) == 3 else OPPORTUNITY_ALERT_THRESHOLD
         if not 0 <= min_score <= 100:
-            await update.message.reply_text("min_score 必须在 0 到 100 之间。")
+            await update.message.reply_text("最低评分必须在 0 到 100 之间。")
             return
         if not (
             asset_code.isdigit()
@@ -151,7 +156,12 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
             and len(asset_code) == 6
             and len(benchmark_code) == 6
         ):
-            await update.message.reply_text("asset_code 和 benchmark_code 必须是 6 位数字代码。")
+            await update.message.reply_text("资产代码和估值基准代码必须是 6 位数字。")
+            return
+        if asset_code[0] not in STOCK_PREFIXES + ETF_PREFIXES:
+            await update.message.reply_text(
+                f"❌ 暂不支持资产代码 {asset_code}，仅支持股票和 ETF 历史数据源覆盖的代码。"
+            )
             return
         if db_execute(
             """
@@ -161,7 +171,7 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
             (update.effective_user.id, asset_code, benchmark_code),
             fetchone=True,
         ):
-            await update.message.reply_text("❌ 相同的资产—benchmark Opportunity Rule 已存在。")
+            await update.message.reply_text("❌ 相同的资产—估值基准监控规则已存在。")
             return
 
         sent_message = await update.message.reply_text(
@@ -176,14 +186,14 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
         valuation = await get_cached_valuation(benchmark_code, context.bot_data)
         if valuation is None:
             await sent_message.edit_text(
-                "❌ 该 benchmark 当前无法通过中证估值接口获取股息率，\n"
+                "❌ 该估值基准当前无法通过中证估值接口获取股息率，\n"
                 "因此无法创建完整的红利估值监控规则。"
             )
             return
         selected_yield = "dividend_yield1" if CSI_DIVIDEND_YIELD_FIELD == "股息率1" else "dividend_yield2"
         if valuation[selected_yield] is None:
             await sent_message.edit_text(
-                "❌ 该 benchmark 当前无法通过中证估值接口获取股息率，\n"
+                "❌ 该估值基准当前无法通过中证估值接口获取股息率，\n"
                 "因此无法创建完整的红利估值监控规则。"
             )
             return
@@ -214,7 +224,7 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
                 swallow_errors=False,
             )
         except sqlite3.IntegrityError:
-            await sent_message.edit_text("❌ 相同的资产—benchmark Opportunity Rule 已存在。")
+            await sent_message.edit_text("❌ 相同的资产—估值基准监控规则已存在。")
             return
 
         rule = db_execute(
@@ -231,14 +241,15 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
         record_rule_evaluation(rule["id"], snapshot)
         creation_complete = True
         await sent_message.edit_text(
-            "✅ Opportunity monitor created\n\n"
-            f"Asset: {asset_name} ({asset_code})\n"
-            f"Benchmark: {benchmark_name} ({benchmark_code})\n\n"
-            f"Current Score: {snapshot.total_score:.0f} / 100\n"
-            f"Level: {snapshot.level}"
+            "✅ 红利机会监控已创建\n\n"
+            f"资产：{asset_name} ({asset_code})\n"
+            f"估值基准：{benchmark_name} ({benchmark_code})\n\n"
+            f"当前评分：{snapshot.total_score:.0f} / 100\n"
+            f"机会等级：{OPPORTUNITY_LEVEL_LABELS.get(snapshot.level, snapshot.level)}\n\n"
+            "提示：机器人只验证两端数据可用，不会自动验证资产实际跟踪该估值基准，请自行核对。"
         )
     except ValueError:
-        await update.message.reply_text("min_score 必须是数字。")
+        await update.message.reply_text("最低评分必须是数字。")
     except Exception as exc:
         logger.exception("添加 Opportunity Rule 失败: %s", exc)
         if created_rule_id is not None and not creation_complete:
@@ -249,9 +260,9 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
                 swallow_errors=False,
             )
         if sent_message:
-            await sent_message.edit_text("添加 Opportunity Rule 时发生内部错误。")
+            await sent_message.edit_text("添加红利机会监控规则时发生内部错误。")
         else:
-            await update.message.reply_text("添加 Opportunity Rule 时发生内部错误。")
+            await update.message.reply_text("添加红利机会监控规则时发生内部错误。")
 
 
 @whitelisted_only
@@ -262,19 +273,19 @@ async def list_opportunity_rules_command(update: Update, context: ContextTypes.D
         fetchall=True,
     )
     if not rules:
-        await update.message.reply_text("您还没有设置 Opportunity Rule。使用 /addop 添加。")
+        await update.message.reply_text("您还没有设置红利机会监控规则。使用 /addop 添加。")
         return
-    lines = ["<b>Opportunity Monitor 列表:</b>", ""]
+    lines = ["<b>红利机会监控列表：</b>", ""]
     for rule in rules:
         icon = "🟢" if rule["is_active"] else "🔴"
-        score = "N/A" if rule["last_score"] is None else f"{rule['last_score']:.0f}"
+        score = "暂无" if rule["last_score"] is None else f"{rule['last_score']:.0f}"
         asset_name = html.escape(str(rule["asset_name"] or rule["asset_code"]))
         benchmark_name = html.escape(str(rule["benchmark_name"] or rule["benchmark_code"]))
         lines.append(
             f"{icon} <b>ID: {rule['id']}</b>\n"
             f"  - {asset_name} (<code>{rule['asset_code']}</code>)\n"
-            f"  - Benchmark: {benchmark_name} (<code>{rule['benchmark_code']}</code>)\n"
-            f"  - Score: {score} | Level: {rule['last_level'] or 'N/A'}\n"
+            f"  - 估值基准：{benchmark_name} (<code>{rule['benchmark_code']}</code>)\n"
+            f"  - 评分：{score} | 等级：{OPPORTUNITY_LEVEL_LABELS.get(rule['last_level'], '暂无')}\n"
             f"  - 告警阈值: {rule['min_score']:.0f}\n"
         )
     await update.message.reply_html("\n".join(lines))
@@ -287,7 +298,7 @@ async def check_opportunity_command(update: Update, context: ContextTypes.DEFAUL
         try:
             rule_id = int(context.args[0])
         except ValueError:
-            await update.message.reply_text("正确格式: /opcheck [rule_id]")
+            await update.message.reply_text("正确格式：/opcheck [规则 ID]")
             return
         rules = db_execute(
             "SELECT * FROM opportunity_rules WHERE id = ? AND user_id = ? AND is_active = 1",
@@ -301,9 +312,9 @@ async def check_opportunity_command(update: Update, context: ContextTypes.DEFAUL
             fetchall=True,
         )
     if not rules:
-        await update.message.reply_text("没有找到已激活的 Opportunity Rule。")
+        await update.message.reply_text("没有找到已激活的红利机会监控规则。")
         return
-    status = await update.message.reply_text("正在计算 Opportunity Score，请稍候...")
+    status = await update.message.reply_text("正在计算红利机会评分，请稍候...")
     cache = context.bot_data.get(KEY_HIST_CACHE, {})
     first = True
     for rule in rules:
@@ -337,7 +348,7 @@ async def delete_opportunity_rule_command(update: Update, context: ContextTypes.
             fetchone=True,
         )
         if not rule:
-            await update.message.reply_text("未找到该 Opportunity Rule，或规则不属于您。")
+            await update.message.reply_text("未找到该红利机会监控规则，或规则不属于您。")
             return
         db_execute(
             "DELETE FROM opportunity_snapshots WHERE rule_id = ?",
@@ -345,9 +356,9 @@ async def delete_opportunity_rule_command(update: Update, context: ContextTypes.
             swallow_errors=False,
         )
         db_execute("DELETE FROM opportunity_rules WHERE id = ?", (rule_id,), swallow_errors=False)
-        await update.message.reply_text(f"✅ Opportunity Rule ID: {rule_id} 已删除。")
+        await update.message.reply_text(f"✅ 红利机会监控规则 ID：{rule_id} 已删除。")
     except (ValueError, IndexError):
-        await update.message.reply_text("正确格式: /delop <rule_id>")
+        await update.message.reply_text("正确格式：/delop <规则 ID>")
 
 
 @whitelisted_only
@@ -356,7 +367,7 @@ async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.
     try:
         rule_id = int(context.args[0])
     except (ValueError, IndexError):
-        await update.message.reply_text(f"正确格式: {command} <rule_id>")
+        await update.message.reply_text(f"正确格式：{command} <规则 ID>")
         return
     rule = db_execute(
         "SELECT id FROM opportunity_rules WHERE id = ? AND user_id = ?",
@@ -364,7 +375,7 @@ async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.
         fetchone=True,
     )
     if not rule:
-        await update.message.reply_text("未找到该 Opportunity Rule，或规则不属于您。")
+        await update.message.reply_text("未找到该红利机会监控规则，或规则不属于您。")
         return
     active = 1 if command == "/opon" else 0
     if active:
@@ -385,7 +396,7 @@ async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.
             (datetime.now(SHANGHAI_TZ).isoformat(), rule_id, update.effective_user.id),
             swallow_errors=False,
         )
-    await update.message.reply_text(f"✅ Opportunity Rule ID: {rule_id} 已{'开启' if active else '关闭'}。")
+    await update.message.reply_text(f"✅ 红利机会监控规则 ID：{rule_id} 已{'开启' if active else '关闭'}。")
 
 
 @whitelisted_only
@@ -422,7 +433,7 @@ async def add_whitelist_command(update: Update, context: ContextTypes.DEFAULT_TY
         add_to_whitelist(user_id)
         await update.message.reply_text(f"✅ 用户 {user_id} 已添加到白名单。")
     except (ValueError, IndexError):
-        await update.message.reply_text("命令格式错误。\n正确格式: /add_w <user_id>")
+        await update.message.reply_text("命令格式错误。\n正确格式：/add_w <用户 ID>")
 
 
 @admin_only
@@ -436,7 +447,7 @@ async def del_whitelist_command(update: Update, context: ContextTypes.DEFAULT_TY
         remove_from_whitelist(user_id)
         await update.message.reply_text(f"✅ 用户 {user_id} 已从白名单中移除。")
     except (ValueError, IndexError):
-        await update.message.reply_text("命令格式错误。\n正确格式: /del_w <user_id>")
+        await update.message.reply_text("命令格式错误。\n正确格式：/del_w <用户 ID>")
 
 
 @admin_only
@@ -456,47 +467,47 @@ async def list_whitelist_command(update: Update, context: ContextTypes.DEFAULT_T
 @admin_only
 async def proxy_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args != ["refresh"]:
-        await update.message.reply_text("正确格式: /proxy_status [refresh]")
+        await update.message.reply_text("正确格式：/proxy_status [refresh]")
         return
     status = await check_proxy_balance_async(force=bool(context.args))
     await notify_proxy_health(context.bot)
     checked_at = status.checked_at.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M %z")
     checked_at = f"{checked_at[:-2]}:{checked_at[-2:]}"
-    balance = "N/A" if status.balance is None else f"{status.balance:g}"
+    balance = "暂无" if status.balance is None else f"{status.balance:g}"
     threshold = (
-        "disabled"
+        "未启用"
         if AKSHARE_PROXY_LOW_BALANCE_THRESHOLD <= 0
         else f"{AKSHARE_PROXY_LOW_BALANCE_THRESHOLD:g}"
     )
     active = proxy_patch_active()
     history_state = (
-        "available"
+        "可用"
         if active and status.state == POSITIVE
-        else "degraded" if ENABLE_AKSHARE_PROXY_PATCH else "direct provider"
+        else "降级" if ENABLE_AKSHARE_PROXY_PATCH else "直连数据源"
     )
     lines = [
-        "AKShare Proxy",
+        "AKShare Proxy 状态",
         "",
-        f"Configured: {'YES' if ENABLE_AKSHARE_PROXY_PATCH else 'NO'}",
-        f"Patch active: {'YES' if active else 'NO'}",
-        f"Balance status: {status.state}",
-        f"Balance: {balance}",
-        f"Last checked: {checked_at}",
-        f"Low-balance threshold: {threshold}",
+        f"已配置：{'是' if ENABLE_AKSHARE_PROXY_PATCH else '否'}",
+        f"补丁已启用：{'是' if active else '否'}",
+        f"余额状态：{PROXY_STATE_LABELS.get(proxy_health_category(status), status.state)}",
+        f"余额：{balance}",
+        f"上次检查：{checked_at}",
+        f"低余额阈值：{threshold}",
         "",
-        f"ETF adjusted-history state: {history_state}",
+        f"ETF 复权历史状态：{history_state}",
     ]
     if ENABLE_AKSHARE_PROXY_PATCH and status.state != POSITIVE:
         retry_at = next_balance_retry_at(status)
         if retry_at is not None:
             retry = retry_at.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M %z")
-            lines.append(f"Next balance retry: {retry[:-2]}:{retry[-2:]}")
+            lines.append(f"下次余额检查：{retry[:-2]}:{retry[-2:]}")
     if status.state == POSITIVE and not active and ENABLE_AKSHARE_PROXY_PATCH:
         lines.extend(
             [
                 "",
-                "Balance is now positive, but the proxy patch was not installed at startup.",
-                "Restart the bot to activate it safely.",
+                "当前余额已恢复，但启动时未安装 Proxy 补丁。",
+                "请重启 Bot 以安全启用。",
             ]
         )
     await update.message.reply_text("\n".join(lines))

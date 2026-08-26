@@ -164,14 +164,14 @@ def build_indicator_close_series(
     if hist_df is None or hist_df.empty or "收盘" not in hist_df.columns:
         return IndicatorPriceSeries(
             pd.Series(dtype=float), None, None, False, True,
-            "Adjusted history unavailable",
+            "复权历史数据不可用",
         )
 
     closes = pd.to_numeric(hist_df["收盘"], errors="coerce").dropna().copy()
     if closes.empty:
         return IndicatorPriceSeries(
             pd.Series(dtype=float), None, None, False, True,
-            "Adjusted history unavailable",
+            "复权历史数据不可用",
         )
     try:
         closes.index = pd.to_datetime(closes.index)
@@ -179,7 +179,7 @@ def build_indicator_close_series(
     except (TypeError, ValueError):
         return IndicatorPriceSeries(
             pd.Series(dtype=float), None, None, False, True,
-            "Adjusted history unavailable",
+            "复权历史数据不可用",
         )
 
     latest_index = closes.index[-1]
@@ -209,14 +209,14 @@ def build_indicator_close_series(
     if not current_qfq:
         if basis != "qfq":
             note = (
-                "Adjusted ETF history unavailable; technical price basis is unavailable"
+                "ETF 复权历史数据不可用，技术价格基准不可用"
                 if basis == "unadjusted_fallback"
-                else "Adjusted history unavailable; technical price basis is unavailable"
+                else "复权历史数据不可用，技术价格基准不可用"
             )
         else:
             note = (
-                "QFQ history basis is not confirmed for the current Shanghai date; "
-                "using latest confirmed qfq close"
+                "前复权历史基准尚未确认适用于当前上海日期，"
+                "使用最近确认的 qfq 收盘价"
             )
         return IndicatorPriceSeries(
             closes,
@@ -238,22 +238,22 @@ def build_indicator_close_series(
     note = None
     degraded = False
     if quote_obj is not None and quote_time is not None and quote_time.date() != today:
-        note = "Realtime quote belongs to a previous session; using the latest confirmed adjusted close"
+        note = "实时行情属于上一个交易日，使用最近确认的复权收盘价"
         degraded = True
     elif quote_obj is not None and not trading_today:
-        note = "Today is not a trading session; using the latest confirmed adjusted close"
+        note = "今天不是交易日，使用最近确认的复权收盘价"
         degraded = True
     elif quote_obj is None:
-        note = "Realtime quote unavailable; using the latest confirmed qfq close"
+        note = "实时行情不可用，使用最近确认的 qfq 收盘价"
         degraded = True
     elif quote_time is None:
-        note = "Realtime quote timestamp unavailable; using the latest confirmed qfq close"
+        note = "实时行情时间不可用，使用最近确认的 qfq 收盘价"
         degraded = True
     elif quote_time > current:
-        note = "Realtime quote timestamp is in the future; using the latest confirmed qfq close"
+        note = "实时行情时间在未来，使用最近确认的 qfq 收盘价"
         degraded = True
     elif quote_time.time() < time(9, 30):
-        note = "Realtime quote timestamp is before market open; using the latest confirmed qfq close"
+        note = "实时行情时间早于开盘时间，使用最近确认的 qfq 收盘价"
         degraded = True
     return IndicatorPriceSeries(closes, latest_price, latest_date, False, degraded, note)
 
@@ -425,7 +425,7 @@ async def get_asset_name_with_cache(asset_code: str, context: ContextTypes.DEFAU
         attempts=_em_retry_attempts(),
     )
     if not name:
-        name = f"Asset_{asset_code}"
+        name = f"资产_{asset_code}"
 
     name_cache[asset_code] = name
     logger.debug(f"已将新资产名称存入缓存: {asset_code} -> {name}")
