@@ -30,7 +30,7 @@ from .config import (
 )
 from .data_fetcher import (
     RealtimeQuote,
-    _fetch_single_realtime_quote,
+    _fetch_all_realtime_quotes,
     build_indicator_close_series,
     calculate_rsi,
     get_history_data_cached,
@@ -253,7 +253,8 @@ async def evaluate_opportunity(
         quote = spot_price
         spot_price = quote.price
     if quote is None and spot_price is None:
-        quote = await _fetch_single_realtime_quote(asset_code)
+        quotes, _ = await _fetch_all_realtime_quotes(context, [asset_code])
+        quote = quotes.get(asset_code)
     elif quote is None and spot_price is not None:
         quote = RealtimeQuote(float(spot_price), None)
     if spot_price is None and quote is not None:
