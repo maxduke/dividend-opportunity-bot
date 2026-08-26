@@ -165,7 +165,7 @@ def test_not_found_detail_is_negative_cached_across_clients_and_offline(tmp_path
     with pytest.raises(NotFoundError):
         xueqiu.fetch_detail("deleted-post")
 
-    marker = tmp_path / "cache/post-deleted-post.not-found"
+    marker = tmp_path / "cache/post-deleted-post.statuses-show.not-found"
     assert marker.read_bytes() == b"not-found\n"
     assert not (tmp_path / "cache/post-deleted-post.json").exists()
 
@@ -193,7 +193,7 @@ def test_refresh_retries_negative_cached_detail_and_removes_marker(tmp_path):
         "id": "deleted-post",
         "text": "restored",
     }
-    assert not (tmp_path / "cache/post-deleted-post.not-found").exists()
+    assert not (tmp_path / "cache/post-deleted-post.statuses-show.not-found").exists()
     assert (tmp_path / "cache/post-deleted-post.json").exists()
 
 
@@ -203,12 +203,25 @@ def test_successful_detail_cache_wins_over_stale_not_found_marker(tmp_path):
     (cache_dir / "post-restored.json").write_text(
         '{"id": "restored", "text": "available"}', encoding="utf-8"
     )
-    (cache_dir / "post-restored.not-found").write_text("not-found\n", encoding="utf-8")
+    (cache_dir / "post-restored.statuses-show.not-found").write_text(
+        "not-found\n", encoding="utf-8"
+    )
     session = Session()
     cached, _ = client(tmp_path, session)
 
     assert cached.fetch_detail("restored")["text"] == "available"
     assert session.calls == []
+
+
+def test_legacy_wrong_endpoint_not_found_marker_is_ignored(tmp_path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "post-restored.not-found").write_text("not-found\n", encoding="utf-8")
+    session = Session([Response(200, {"id": "restored", "text": "available"})])
+    xueqiu, _ = client(tmp_path, session)
+
+    assert xueqiu.fetch_detail("restored")["text"] == "available"
+    assert session.calls[0][0] == "https://api.xueqiu.com/statuses/show.json"
 
 
 def test_malformed_json_is_clear_and_not_cached(tmp_path):
@@ -245,7 +258,7 @@ def test_detail_is_on_demand_and_cached(tmp_path):
     xueqiu, _ = client(tmp_path, session)
 
     assert xueqiu.fetch_detail(42) == {"id": "42", "text": "detail"}
-    assert session.calls[0][0] == "https://api.xueqiu.com/v4/statuses/show.json"
+    assert session.calls[0][0] == "https://api.xueqiu.com/statuses/show.json"
     assert session.calls[0][1]["params"] == {"id": "42"}
     assert (tmp_path / "cache/post-42.json").exists()
 

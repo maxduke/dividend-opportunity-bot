@@ -21,7 +21,7 @@ from typing import Any, Self
 import requests
 
 TIMELINE_URL = "https://api.xueqiu.com/v4/statuses/user_timeline.json"
-DETAIL_URL = "https://api.xueqiu.com/v4/statuses/show.json"
+DETAIL_URL = "https://api.xueqiu.com/statuses/show.json"
 DEFAULT_USER_ID = "8374048440"
 DEFAULT_COUNT = 20
 DEFAULT_TYPE = 10
@@ -85,7 +85,7 @@ class XueqiuClient:
     ``cache_dir`` is the account-specific directory for provider payloads.  A
     timeline page is stored as ``timeline-page-NNNN.json`` and a detail
     response as ``post-ID.json``.  Deleted detail posts also leave a separate
-    ``post-ID.not-found`` marker, never a fake provider response.
+    ``post-ID.statuses-show.not-found`` marker, never a fake provider response.
     """
 
     def __init__(
@@ -175,7 +175,9 @@ class XueqiuClient:
         return self.cache_dir / f"post-{post_id}.json"
 
     def _detail_not_found_path(self, post_id: str) -> Path:
-        return self.cache_dir / f"post-{post_id}.not-found"
+        # Include the endpoint identity so a corrected endpoint never trusts
+        # negative results cached by an older, incorrect route.
+        return self.cache_dir / f"post-{post_id}.statuses-show.not-found"
 
     def _read_cache(self, path: Path) -> Any:
         try:
