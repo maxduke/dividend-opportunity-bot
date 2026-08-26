@@ -226,33 +226,33 @@ MA200 / 52周回撤 / RSI6 将在必要时自动降级关闭。
 请检查：
 https://ak.cheapproxy.net
 
-充值或修复 Token 后重启 Bot。"""
+充值或修复 Token 后重启机器人。"""
 
 STARTUP_UNVERIFIED_MESSAGE = """⚠️ AKShare Proxy 状态无法验证
 
 余额接口当前无法正常返回结果，因此本次启动未启用付费 proxy。
 
-Bot 将继续运行，但 ETF 技术评分可能降级。
+机器人将继续运行，但 ETF 技术评分可能降级。
 
-检查网络/服务状态后重启 Bot。"""
+检查网络/服务状态后重启机器人。"""
 
 RUNTIME_NO_BALANCE_MESSAGE = """⚠️ AKShare Proxy 积分不足
 
 技术数据源已进入降级模式。
-ETF qfq history 暂停请求，技术评分可能不可用。
+ETF 前复权历史数据暂停请求，技术评分可能不可用。
 
-Bot 会定期重新检查余额。
+机器人会定期重新检查余额。
 充值后无需重建规则。"""
 
 RUNTIME_UNVERIFIED_MESSAGE = """⚠️ AKShare Proxy 状态无法验证
 
-运行时余额检查失败，ETF qfq history 暂停请求，技术评分可能不可用。
+运行时余额检查失败，ETF 前复权历史数据暂停请求，技术评分可能不可用。
 
-Bot 会定期重新检查服务状态。"""
+机器人会定期重新检查服务状态。"""
 
 RECOVERY_MESSAGE = """✅ AKShare Proxy 已恢复
 
-检测到积分恢复，ETF qfq history 将重新启用。
+检测到积分恢复，ETF 前复权历史数据将重新启用。
 技术评分将在下一次成功获取历史数据后自动恢复。"""
 
 

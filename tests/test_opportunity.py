@@ -97,9 +97,9 @@ def test_compact_alert_omits_pe_and_full_notes_but_detail_shows_dates():
     detail = format_opportunity_detail(snapshot)
 
     assert "PE1" not in alert and "PE2" not in alert and "full audit note" not in alert
-    assert "Use /opcheck 1" in alert
-    assert "Technical price: 2026-08-24" in detail
-    assert "qfq_realtime" in detail and "CSI valuation: 2026-08-23" in detail
+    assert "使用 /opcheck 1" in alert
+    assert "技术价格：2026-08-24" in detail
+    assert "前复权实时价（qfq）" in detail and "中证估值：2026-08-23" in detail
 
 
 @pytest.mark.parametrize("write", [record_rule_evaluation, record_rule_alert])
@@ -193,7 +193,7 @@ def test_unadjusted_etf_fallback_disables_long_term_metrics(monkeypatch):
     assert snapshot.high_52w is None
     assert snapshot.rsi6 is None
     assert snapshot.long_term_score == 0
-    assert "Adjusted ETF history unavailable" in snapshot.data_notes[0]
+    assert "ETF 复权历史数据不可用" in snapshot.data_notes[0]
     history_fetch.assert_not_awaited()
 
 
@@ -206,11 +206,11 @@ def test_degraded_detail_separates_spot_and_technical_price():
 
     detail = format_opportunity_detail(snapshot)
 
-    assert "⚠️ <b>Partial score</b>" in detail
-    assert "Spot: 1.453" in detail
-    assert "Technical Price: 1.433" in detail
-    assert "Technical Date: 2026-08-21" in detail
-    assert "Current: 1.433" not in detail
+    assert "⚠️ <b>部分评分</b>" in detail
+    assert "现价：1.453" in detail
+    assert "技术价：1.433" in detail
+    assert "技术日期：2026-08-21" in detail
+    assert "当前价：1.433" not in detail
 
 
 def test_alert_gate_suppresses_only_missing_runtime_technical_basis():
@@ -309,7 +309,7 @@ def test_future_valuation_date_is_stale_and_cannot_raise_level(monkeypatch):
 
     assert snapshot.level not in {"MODERATE", "STRONG", "RARE"}
     assert snapshot.data_quality == "STALE_VALUATION"
-    assert "Valuation date is in the future; freshness invalid" in snapshot.data_notes
+    assert "估值日期在未来，新鲜度无效" in snapshot.data_notes
 
 
 def test_unconfirmed_qfq_basis_marks_qfq_fallback_degraded(monkeypatch):
@@ -329,7 +329,7 @@ def test_unconfirmed_qfq_basis_marks_qfq_fallback_degraded(monkeypatch):
 
     assert snapshot.technical_price_basis == "qfq_history_close"
     assert snapshot.data_quality == "DEGRADED"
-    assert any("basis is not confirmed" in note.lower() for note in snapshot.data_notes)
+    assert any("基准尚未确认" in note for note in snapshot.data_notes)
 
 
 def test_percentile_maturity_requires_observations_and_real_span():

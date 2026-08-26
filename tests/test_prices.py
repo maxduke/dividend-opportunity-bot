@@ -109,7 +109,7 @@ def test_same_day_quote_before_0930_is_rejected(monkeypatch):
     assert list(result.closes) == [100]
     assert not result.spot_used
     assert result.degraded
-    assert "before market open" in result.note
+    assert "早于开盘时间" in result.note
 
 
 def test_current_day_history_is_replaced_without_duplicate(monkeypatch):
@@ -157,7 +157,7 @@ def test_stale_qfq_basis_keeps_confirmed_qfq_close(monkeypatch):
     assert list(result.closes) == [100]
     assert not result.spot_used
     assert result.degraded
-    assert "basis is not confirmed" in result.note
+    assert "基准尚未确认" in result.note
 
 
 def test_today_history_row_confirms_qfq_basis_when_asof_is_missing(monkeypatch):

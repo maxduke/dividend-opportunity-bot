@@ -14,10 +14,14 @@ import pandas as pd
 
 from .config import (
     CSI_DIVIDEND_YIELD_FIELD,
+    DATA_QUALITY_LABELS,
     MIN_VALUATION_SCORE_FOR_OPPORTUNITY,
     OPPORTUNITY_ALERT_COOLDOWN_MINUTES,
+    OPPORTUNITY_LEVEL_LABELS,
     OPPORTUNITY_MAX_ALERTS_PER_DAY,
     RSI_PERIOD,
+    SCORING_MODE_LABELS,
+    TECHNICAL_BASIS_LABELS,
     TECHNICAL_HISTORY_DAYS,
     VALUATION_PERCENTILE_LOOKBACK_YEARS,
     VALUATION_PERCENTILE_MIN_OBS,
@@ -130,6 +134,10 @@ def _row_value(row, key: str, default=None):
         return row[key]
     except (KeyError, IndexError, TypeError):
         return default
+
+
+def _display_label(labels: dict[str, str], value: str | None) -> str:
+    return labels.get(value, value) if value else '暂无'
 
 
 def _match_bond(rows, target_date: date):
@@ -286,13 +294,13 @@ async def evaluate_opportunity(
     if indicator_series.note:
         notes.append(indicator_series.note)
     if not technical_basis_available:
-        notes.append("Adjusted history unavailable; MA200, 52-week drawdown, and RSI disabled")
+        notes.append("复权历史数据不可用，已停用 MA200、52 周回撤和 RSI")
     elif ma200 is None:
-        notes.append("MA200 unavailable: fewer than 200 valid close observations")
+        notes.append("MA200 不可用：有效收盘价少于 200 条")
     if technical_basis_available and high_52w is None:
-        notes.append("52-week drawdown unavailable: fewer than 252 valid close observations")
+        notes.append("52 周回撤不可用：有效收盘价少于 252 条")
     if hist_df is None or hist_df.empty:
-        notes.append("Technical history unavailable")
+        notes.append("技术历史数据不可用")
 
     valuation = await get_cached_valuation(benchmark_code, bot_data)
     valuation_date = _date_or_none(_row_value(valuation, "valuation_date")) if valuation else None
@@ -305,17 +313,17 @@ async def evaluate_opportunity(
     pe2 = _float_or_none(valuation["pe2"]) if valuation else None
     stale = False
     if not valuation:
-        notes.append("Dividend yield unavailable; valuation safety gate applied")
+        notes.append("股息率不可用，已启用估值安全门控")
     elif not valuation_available:
-        notes.append(f"Selected dividend-yield field unavailable: {CSI_DIVIDEND_YIELD_FIELD}")
+        notes.append(f"所选股息率字段不可用：{CSI_DIVIDEND_YIELD_FIELD}")
     elif valuation_date is None:
         # A value without a date cannot be trusted as fresh.  Keep the value
         # visible for diagnostics, but let the normal stale gate cap the level.
         stale = True
-        notes.append("Valuation date unavailable; freshness cannot be determined")
+        notes.append("估值日期不可用，无法判断数据新鲜度")
     elif valuation_date > now.date():
         stale = True
-        notes.append("Valuation date is in the future; freshness invalid")
+        notes.append("估值日期在未来，新鲜度无效")
     else:
         try:
             sessions = trading_sessions_elapsed(valuation_date, now.date())
@@ -324,17 +332,17 @@ async def evaluate_opportunity(
             sessions = None
         if sessions is None:
             stale = (now.date() - valuation_date).days > 14
-            notes.append("Trading-calendar freshness unavailable; calendar-day fallback used.")
+            notes.append("交易日历新鲜度不可用，已回退到自然日判断")
             if stale:
                 notes.append(
-                    f"Valuation date {valuation_date.isoformat()} exceeds 14 calendar days"
+                    f"估值日期 {valuation_date.isoformat()} 已超过 14 个自然日"
                 )
         else:
             stale = sessions > VALUATION_STALE_MAX_TRADING_DAYS
             if stale:
                 notes.append(
-                    f"Valuation date {valuation_date.isoformat()} is {sessions} trading sessions old "
-                    f"(max {VALUATION_STALE_MAX_TRADING_DAYS})"
+                    f"估值日期 {valuation_date.isoformat()} 已过去 {sessions} 个交易日 "
+                    f"（上限 {VALUATION_STALE_MAX_TRADING_DAYS}）"
                 )
 
     dy_percentile = None
@@ -357,11 +365,11 @@ async def evaluate_opportunity(
         if dy_history_complete and dividend_yield_used is not None:
             dy_percentile = calculate_percentile(dividend_yield_used, dy_history)
             notes.append(
-                f"Dividend-yield history: {dy_observations} observations, span {dy_span_years:.1f} years; percentile used"
+                f"股息率历史：{dy_observations} 条，跨度 {dy_span_years:.1f} 年；已使用历史分位"
             )
         else:
             notes.append(
-                f"Dividend-yield percentile unavailable: {dy_observations} observations, span {dy_span_years:.1f} years; absolute thresholds used"
+                f"股息率历史分位不可用：{dy_observations} 条，跨度 {dy_span_years:.1f} 年；已使用绝对值阈值"
             )
 
         latest_bond = await get_cached_cn10y(bot_data)
@@ -376,7 +384,7 @@ async def evaluate_opportunity(
             if cn10y is not None and dividend_yield_used is not None:
                 spread = dividend_yield_used - cn10y
         else:
-            notes.append("No China 10Y observation within 7 calendar days before valuation date")
+            notes.append("估值日期前 7 个自然日内没有中国十年期国债数据")
 
         spread_rows = _history_spreads(valuation_rows, bond_rows, CSI_DIVIDEND_YIELD_FIELD)
         spread_values = [value for _, value in spread_rows]
@@ -384,14 +392,14 @@ async def evaluate_opportunity(
         if spread_history_complete and spread is not None:
             spread_percentile = calculate_percentile(spread, spread_values)
             notes.append(
-                f"Spread history: {spread_observations} observations, span {spread_span_years:.1f} years; percentile used"
+                f"股息率—国债利差历史：{spread_observations} 条，跨度 {spread_span_years:.1f} 年；已使用历史分位"
             )
         elif not spread_history_complete:
             notes.append(
-                f"Spread percentile unavailable: {spread_observations} observations, span {spread_span_years:.1f} years; absolute thresholds used"
+                f"股息率—国债利差分位不可用：{spread_observations} 条，跨度 {spread_span_years:.1f} 年；已使用绝对值阈值"
             )
     else:
-        notes.append("Valuation-dependent spread is unavailable")
+        notes.append("依赖估值数据的利差不可用")
 
     dividend_yield_score = score_dividend_yield(dividend_yield_used, dy_percentile)
     spread_score = score_dividend_bond_spread(spread, spread_percentile)
@@ -428,7 +436,7 @@ async def evaluate_opportunity(
     if data_quality == "OK" and indicator_series.degraded:
         data_quality = "DEGRADED"
     if cn10y_source == "sina":
-        notes.append("CN10Y source: Sina fallback")
+        notes.append("中国十年期国债数据来源：Sina 回退源")
 
     snapshot = OpportunitySnapshot(
         rule_id=int(rule["id"]),
@@ -632,76 +640,76 @@ def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optio
     safe_benchmark = html.escape(snapshot.benchmark_name)
 
     def f(value, digits=2, suffix=""):
-        return "N/A" if value is None else f"{float(value):.{digits}f}{suffix}"
+        return "暂无" if value is None else f"{float(value):.{digits}f}{suffix}"
 
-    percentile = "N/A" if snapshot.dividend_yield_percentile is None else f"{snapshot.dividend_yield_percentile * 100:.0f}%"
-    spread_percentile = "N/A" if snapshot.spread_percentile is None else f"{snapshot.spread_percentile * 100:.0f}%"
-    notes = "\n".join(f"- {html.escape(note)}" for note in snapshot.data_notes) or "- None"
+    percentile = "暂无" if snapshot.dividend_yield_percentile is None else f"{snapshot.dividend_yield_percentile * 100:.0f}%"
+    spread_percentile = "暂无" if snapshot.spread_percentile is None else f"{snapshot.spread_percentile * 100:.0f}%"
+    notes = "\n".join(f"- {html.escape(note)}" for note in snapshot.data_notes) or "- 无"
     trigger = {
         "threshold-crossing": "分数跨过该规则告警阈值",
         "level-upgrade": "机会等级升级",
     }.get(alert_reason or "")
-    trigger_line = f"Trigger: <b>{trigger}</b>\n\n" if trigger else ""
+    trigger_line = f"触发原因：<b>{trigger}</b>\n\n" if trigger else ""
     partial_warning = (
-        "⚠️ <b>Partial score</b>\n\n"
-        "Adjusted technical history is unavailable.\n"
-        "MA200 / 52W drawdown / RSI6 are excluded from this result.\n"
-        "Do not interpret this as a complete 0–100 Opportunity Score.\n\n"
+        "⚠️ <b>部分评分</b>\n\n"
+        "复权技术历史数据不可用。\n"
+        "本次结果不包含 MA200 / 52 周回撤 / RSI6。\n"
+        "请勿将其理解为完整的 0–100 红利机会评分。\n\n"
         if snapshot.technical_price_basis == "unavailable"
         else ""
     )
     price_lines = (
-        f"Current: {f(snapshot.spot_price if snapshot.spot_price is not None else snapshot.price, 3)}\n"
+        f"当前价：{f(snapshot.spot_price if snapshot.spot_price is not None else snapshot.price, 3)}\n"
         if snapshot.technical_price_basis == "qfq_realtime"
         else (
-            f"Spot: {f(snapshot.spot_price, 3)}\n"
-            f"Technical Price: {f(snapshot.price, 3)}\n"
-            f"Technical Date: {html.escape(snapshot.technical_price_date or 'N/A')}\n"
-            f"Basis: {html.escape(snapshot.technical_price_basis or 'unavailable')}\n"
+            f"现价：{f(snapshot.spot_price, 3)}\n"
+            f"技术价：{f(snapshot.price, 3)}\n"
+            f"技术日期：{html.escape(snapshot.technical_price_date or '暂无')}\n"
+            f"价格基准：{html.escape(_display_label(TECHNICAL_BASIS_LABELS, snapshot.technical_price_basis))}\n"
         )
     )
     return (
-        f"{icon} <b>{snapshot.level} Opportunity</b>\n"
-        f"Score: <b>{snapshot.total_score:.0f} / 100</b>\n\n"
+        f"{icon} <b>红利机会 · {_display_label(OPPORTUNITY_LEVEL_LABELS, snapshot.level)}</b>\n"
+        f"评分：<b>{snapshot.total_score:.0f} / 100</b>\n\n"
         f"{partial_warning}"
         f"{trigger_line}"
         f"{safe_asset} (<code>{html.escape(snapshot.asset_code)}</code>)\n"
-        f"Benchmark: {safe_benchmark} (<code>{html.escape(snapshot.benchmark_code)}</code>)\n\n"
-        f"📊 <b>Valuation</b> {snapshot.valuation_score:.0f} / 50\n\n"
-        f"Dividend Yield\n"
-        f"D/P1: {f(snapshot.dividend_yield1, 2, '%')}\n"
-        f"D/P2: {f(snapshot.dividend_yield2, 2, '%')} (used: {CSI_DIVIDEND_YIELD_FIELD})\n\n"
-        f"PE1: {f(snapshot.pe1, 2)}\n"
-        f"PE2: {f(snapshot.pe2, 2)}\n\n"
-        f"Historical percentile: {percentile}\n"
-        f"Spread percentile: {spread_percentile}\n"
-        f"Scoring mode: <code>{snapshot.scoring_mode}</code>\n\n"
-        f"China 10Y: {f(snapshot.cn10y, 2, '%')}"
-        f" ({html.escape(snapshot.cn10y_source or 'N/A')})\n"
-        f"Dividend-Bond Spread: {f(snapshot.dividend_bond_spread, 2, ' pp')}\n\n"
-        f"📉 <b>Long-Term</b> {snapshot.long_term_score:.0f} / 30\n\n"
+        f"估值基准：{safe_benchmark} (<code>{html.escape(snapshot.benchmark_code)}</code>)\n\n"
+        f"📊 <b>估值</b> {snapshot.valuation_score:.0f} / 50\n\n"
+        f"股息率\n"
+        f"D/P1：{f(snapshot.dividend_yield1, 2, '%')}\n"
+        f"D/P2：{f(snapshot.dividend_yield2, 2, '%')}（使用：{CSI_DIVIDEND_YIELD_FIELD}）\n\n"
+        f"PE1：{f(snapshot.pe1, 2)}\n"
+        f"PE2：{f(snapshot.pe2, 2)}\n\n"
+        f"历史分位：{percentile}\n"
+        f"利差分位：{spread_percentile}\n"
+        f"评分模式：<code>{_display_label(SCORING_MODE_LABELS, snapshot.scoring_mode)}</code>\n\n"
+        f"中国十年期国债：{f(snapshot.cn10y, 2, '%')}"
+        f"（{html.escape(snapshot.cn10y_source or '暂无')}）\n"
+        f"股息率—国债利差：{f(snapshot.dividend_bond_spread, 2, ' 个百分点')}\n\n"
+        f"📉 <b>长期</b> {snapshot.long_term_score:.0f} / 30\n\n"
         f"{price_lines}"
-        f"MA200: {f(snapshot.ma200, 3)}\n"
-        f"Deviation: {f(None if snapshot.ma200_deviation is None else snapshot.ma200_deviation * 100, 2, '%')}\n"
-        f"52W High: {f(snapshot.high_52w, 3)}\n"
-        f"Drawdown: {f(None if snapshot.drawdown_52w is None else snapshot.drawdown_52w * 100, 2, '%')}\n\n"
-        f"⚡ <b>Tactical</b> {snapshot.tactical_score:.0f} / 20\n\n"
-        f"RSI({RSI_PERIOD}): {f(snapshot.rsi6, 2)}\n\n"
-        f"🧮 <b>Breakdown</b>\n"
-        f"Dividend Yield: {snapshot.dividend_yield_score:.0f} / 30\n"
-        f"Dividend-Bond Spread: {snapshot.spread_score:.0f} / 20\n"
-        f"MA200: {score_ma200(snapshot.ma200_deviation):.0f} / 20\n"
-        f"52W Drawdown: {score_drawdown(snapshot.drawdown_52w):.0f} / 10\n"
-        f"RSI6: {score_rsi(snapshot.rsi6):.0f} / 20\n\n"
-        f"Total: <b>{snapshot.total_score:.0f} / 100</b>\n\n"
-        f"📅 <b>Data dates</b>\n"
-        f"Technical price: {html.escape(snapshot.technical_price_date or 'N/A')}\n"
-        f"Basis: <code>{html.escape(snapshot.technical_price_basis or 'unavailable')}</code>\n"
-        f"CSI valuation: {html.escape(snapshot.valuation_date or 'N/A')}\n"
-        f"China 10Y: {html.escape(snapshot.cn10y_date or 'N/A')}\n"
-        f"Source: {html.escape(snapshot.cn10y_source or 'N/A')}\n\n"
-        f"Data Quality: <code>{snapshot.data_quality}</code>\n"
-        f"Notes:\n{notes}"
+        f"MA200：{f(snapshot.ma200, 3)}\n"
+        f"偏离度：{f(None if snapshot.ma200_deviation is None else snapshot.ma200_deviation * 100, 2, '%')}\n"
+        f"52 周高点：{f(snapshot.high_52w, 3)}\n"
+        f"回撤：{f(None if snapshot.drawdown_52w is None else snapshot.drawdown_52w * 100, 2, '%')}\n\n"
+        f"⚡ <b>战术</b> {snapshot.tactical_score:.0f} / 20\n\n"
+        f"RSI({RSI_PERIOD})：{f(snapshot.rsi6, 2)}\n\n"
+        f"🧮 <b>评分明细</b>\n"
+        f"股息率：{snapshot.dividend_yield_score:.0f} / 30\n"
+        f"股息率—国债利差：{snapshot.spread_score:.0f} / 20\n"
+        f"MA200：{score_ma200(snapshot.ma200_deviation):.0f} / 20\n"
+        f"52 周回撤：{score_drawdown(snapshot.drawdown_52w):.0f} / 10\n"
+        f"RSI6：{score_rsi(snapshot.rsi6):.0f} / 20\n\n"
+        f"总分：<b>{snapshot.total_score:.0f} / 100</b>\n\n"
+        f"📅 <b>数据日期</b>\n"
+        f"技术价格：{html.escape(snapshot.technical_price_date or '暂无')}\n"
+        f"价格基准：<code>{html.escape(_display_label(TECHNICAL_BASIS_LABELS, snapshot.technical_price_basis))}</code>\n"
+        f"中证估值：{html.escape(snapshot.valuation_date or '暂无')}\n"
+        f"中国十年期国债：{html.escape(snapshot.cn10y_date or '暂无')}\n"
+        f"数据来源：{html.escape(snapshot.cn10y_source or '暂无')}\n\n"
+        f"数据质量：<code>{_display_label(DATA_QUALITY_LABELS, snapshot.data_quality)}</code>\n"
+        f"备注：\n{notes}"
     )
 
 
@@ -710,31 +718,31 @@ def format_opportunity_alert(snapshot: OpportunitySnapshot, reason: Optional[str
     icon = {"NEUTRAL": "⚪", "WATCH": "🟡", "MODERATE": "🟢", "STRONG": "🟢", "RARE": "🔥"}.get(snapshot.level, "⚪")
 
     def f(value, digits=2, suffix=""):
-        return "N/A" if value is None else f"{float(value):.{digits}f}{suffix}"
+        return "暂无" if value is None else f"{float(value):.{digits}f}{suffix}"
 
     trigger = {
-        "threshold-crossing": "Opportunity score crossed the alert threshold",
-        "level-upgrade": "Opportunity level upgraded",
-    }.get(reason or "", reason or "Opportunity alert")
+        "threshold-crossing": "分数跨过告警阈值",
+        "level-upgrade": "机会等级升级",
+    }.get(reason or "", "机会告警")
     return (
-        f"{icon} <b>{html.escape(snapshot.level)} Opportunity</b> — <b>{snapshot.total_score:.0f}/100</b>\n\n"
+        f"{icon} <b>红利机会 · {_display_label(OPPORTUNITY_LEVEL_LABELS, snapshot.level)}</b> — <b>{snapshot.total_score:.0f}/100</b>\n\n"
         f"{html.escape(snapshot.asset_name)} (<code>{html.escape(snapshot.asset_code)}</code>)\n"
-        f"Benchmark: {html.escape(snapshot.benchmark_name)}\n\n"
-        f"Valuation       {snapshot.valuation_score:.0f}/50\n"
-        f"Long-Term       {snapshot.long_term_score:.0f}/30\n"
-        f"Tactical        {snapshot.tactical_score:.0f}/20\n\n"
-        f"DY              {f(snapshot.dividend_yield_used, 2, '%')}\n"
-        f"DY-CN10Y        {f(snapshot.dividend_bond_spread, 2, 'pp')}\n"
-        f"MA200           {f(None if snapshot.ma200_deviation is None else snapshot.ma200_deviation * 100, 1, '%')}\n"
-        f"52W DD          {f(None if snapshot.drawdown_52w is None else snapshot.drawdown_52w * 100, 1, '%')}\n"
+        f"估值基准：{html.escape(snapshot.benchmark_name)}\n\n"
+        f"估值           {snapshot.valuation_score:.0f}/50\n"
+        f"长期           {snapshot.long_term_score:.0f}/30\n"
+        f"战术           {snapshot.tactical_score:.0f}/20\n\n"
+        f"股息率         {f(snapshot.dividend_yield_used, 2, '%')}\n"
+        f"股息率—国债   {f(snapshot.dividend_bond_spread, 2, '个百分点')}\n"
+        f"MA200          {f(None if snapshot.ma200_deviation is None else snapshot.ma200_deviation * 100, 1, '%')}\n"
+        f"52 周回撤      {f(None if snapshot.drawdown_52w is None else snapshot.drawdown_52w * 100, 1, '%')}\n"
         f"RSI{RSI_PERIOD}            {f(snapshot.rsi6, 1)}\n\n"
-        f"Valuation date  {html.escape(snapshot.valuation_date or 'N/A')}\n"
-        f"CN10Y date      {html.escape(snapshot.cn10y_date or 'N/A')}\n"
-        f"Price date      {html.escape(snapshot.technical_price_date or 'N/A')}\n\n"
-        f"Mode            <code>{html.escape(snapshot.scoring_mode)}</code>\n"
-        f"Data            <code>{html.escape(snapshot.data_quality)}</code>\n\n"
-        f"Trigger: {html.escape(trigger)}\n"
-        f"Use /opcheck {snapshot.rule_id} for full details."
+        f"估值日期       {html.escape(snapshot.valuation_date or '暂无')}\n"
+        f"国债日期       {html.escape(snapshot.cn10y_date or '暂无')}\n"
+        f"价格日期       {html.escape(snapshot.technical_price_date or '暂无')}\n\n"
+        f"模式           <code>{html.escape(_display_label(SCORING_MODE_LABELS, snapshot.scoring_mode))}</code>\n"
+        f"数据           <code>{html.escape(_display_label(DATA_QUALITY_LABELS, snapshot.data_quality))}</code>\n\n"
+        f"触发原因：{html.escape(trigger)}\n"
+        f"使用 /opcheck {snapshot.rule_id} 查看完整详情。"
     )
 
 

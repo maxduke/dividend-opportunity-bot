@@ -292,7 +292,7 @@ def test_proxy_mode_does_not_call_unproxyable_etf_name_endpoint(monkeypatch):
 
     name = asyncio.run(data_fetcher.get_asset_name_with_cache("510300", context))
 
-    assert name == "Asset_510300"
+    assert name == "资产_510300"
 
 
 def test_unusable_proxy_does_not_call_stock_name_endpoint(monkeypatch):
@@ -318,7 +318,7 @@ def test_unusable_proxy_does_not_call_stock_name_endpoint(monkeypatch):
         )
     )
 
-    assert name == "Asset_600000"
+    assert name == "资产_600000"
     balance_check.assert_not_awaited()
 
     active = True
@@ -328,7 +328,7 @@ def test_unusable_proxy_does_not_call_stock_name_endpoint(monkeypatch):
         )
     )
 
-    assert name == "Asset_600001"
+    assert name == "资产_600001"
     balance_check.assert_awaited_once()
 
 

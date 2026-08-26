@@ -21,9 +21,12 @@ from telegram.error import Forbidden, RetryAfter
 from telegram.ext import ContextTypes
 
 from .config import (
+    DATA_QUALITY_LABELS,
     ENABLE_INTRADAY_MONITOR,
+    OPPORTUNITY_LEVEL_LABELS,
     REQUEST_INTERVAL_SECONDS,
     RSI_PERIOD,
+    SCORING_MODE_LABELS,
     TECHNICAL_HISTORY_DAYS,
 )
 from .data_fetcher import (
@@ -233,15 +236,15 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
         rules_by_user[rule["user_id"]].append(rule)
     today = now.strftime("%Y年%m月%d日")
     for user_id, user_rules in rules_by_user.items():
-        message = f"📰 <b>收盘前 Opportunity 简报 ({today})</b>\n\n"
+        message = f"📰 <b>收盘前红利机会简报（{today}）</b>\n\n"
         if any(
             snapshots.get(rule["id"]) is not None
             and snapshots[rule["id"]].technical_price_basis == "unavailable"
             for rule in user_rules
         ):
             message += (
-                "⚠️ Technical data degraded for one or more assets.\n"
-                "See /opcheck for details.\n\n"
+                "⚠️ 一个或多个资产的技术数据已降级。\n"
+                "请使用 /opcheck 查看详情。\n\n"
             )
         for rule in user_rules:
             snapshot = snapshots.get(rule["id"])
@@ -250,34 +253,34 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
                 continue
             dy = (
                 f"{snapshot.dividend_yield_used:.2f}%"
-                if snapshot.dividend_yield_used is not None else "N/A"
+                if snapshot.dividend_yield_used is not None else "暂无"
             )
             spread = (
-                f"{snapshot.dividend_bond_spread:.2f}pp"
-                if snapshot.dividend_bond_spread is not None else "N/A"
+                f"{snapshot.dividend_bond_spread:.2f} 个百分点"
+                if snapshot.dividend_bond_spread is not None else "暂无"
             )
             ma = (
                 f"{snapshot.ma200_deviation * 100:.1f}%"
-                if snapshot.ma200_deviation is not None else "N/A"
+                if snapshot.ma200_deviation is not None else "暂无"
             )
             drawdown = (
                 f"{snapshot.drawdown_52w * 100:.1f}%"
-                if snapshot.drawdown_52w is not None else "N/A"
+                if snapshot.drawdown_52w is not None else "暂无"
             )
-            rsi = f"{snapshot.rsi6:.1f}" if snapshot.rsi6 is not None else "N/A"
+            rsi = f"{snapshot.rsi6:.1f}" if snapshot.rsi6 is not None else "暂无"
             technically_degraded = snapshot.technical_price_basis == "unavailable"
             displayed_quality = "DEGRADED" if technically_degraded else snapshot.data_quality
             message += (
-                f"{snapshot.level} <b>{html.escape(snapshot.asset_name)}</b> ({snapshot.asset_code})\n"
-                f"  Score: <b>{snapshot.total_score:.0f}</b> | Level: {snapshot.level}\n"
-                f"  Mode: <code>{html.escape(snapshot.scoring_mode)}</code> | Data: <code>{html.escape(displayed_quality)}</code>\n"
-                f"  Technical: {'unavailable' if technically_degraded else 'available'}\n"
-                f"  As of: Price {html.escape(snapshot.technical_price_date or 'N/A')} | Valuation {html.escape(snapshot.valuation_date or 'N/A')}\n"
-                f"  DY: {dy}\n"
-                f"  DY-CN10Y: {spread}\n"
-                f"  MA200 deviation: {ma}\n"
-                f"  52W DD: {drawdown}\n"
-                f"  RSI({RSI_PERIOD}): {rsi}\n\n"
+                f"{OPPORTUNITY_LEVEL_LABELS.get(snapshot.level, snapshot.level)} <b>{html.escape(snapshot.asset_name)}</b> ({snapshot.asset_code})\n"
+                f"  评分：<b>{snapshot.total_score:.0f}</b> | 等级：{OPPORTUNITY_LEVEL_LABELS.get(snapshot.level, snapshot.level)}\n"
+                f"  模式：<code>{html.escape(SCORING_MODE_LABELS.get(snapshot.scoring_mode, snapshot.scoring_mode))}</code> | 数据：<code>{html.escape(DATA_QUALITY_LABELS.get(displayed_quality, displayed_quality))}</code>\n"
+                f"  技术数据：{'不可用' if technically_degraded else '可用'}\n"
+                f"  截至：价格 {html.escape(snapshot.technical_price_date or '暂无')} | 估值 {html.escape(snapshot.valuation_date or '暂无')}\n"
+                f"  股息率：{dy}\n"
+                f"  股息率—国债利差：{spread}\n"
+                f"  MA200 偏离度：{ma}\n"
+                f"  52 周回撤：{drawdown}\n"
+                f"  RSI({RSI_PERIOD})：{rsi}\n\n"
             )
         try:
             for chunk in split_message(message):
