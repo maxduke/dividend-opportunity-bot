@@ -42,7 +42,7 @@ from .proxy_health import (
     notify_proxy_health,
     proxy_patch_active,
 )
-from .utils import get_sina_symbol, normalize_hist_df, split_message
+from .utils import get_sina_symbol, normalize_hist_df
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
@@ -683,22 +683,28 @@ async def _fetch_all_realtime_quotes(
             and not failure_notified.get(code, False)
         }
         if pending:
-            details = "\n".join(f"- `{code}`：连续失败 {count} 次" for code, count in pending.items())
-            admin_message = (
-                "🚨 **机器人警报** 🚨\n\n"
-                "以下资产连续获取报价失败已达到阈值：\n"
-                f"{details}\n\n请检查行情接口连通性。"
-            )
             try:
-                for chunk in split_message(admin_message):
+                pending_items = list(pending.items())
+                # ponytail: 50 six-digit codes stay well below Telegram's limit.
+                for offset in range(0, len(pending_items), 50):
+                    batch = dict(pending_items[offset:offset + 50])
+                    details = "\n".join(
+                        f"- `{code}`：连续失败 {count} 次"
+                        for code, count in batch.items()
+                    )
+                    admin_message = (
+                        "🚨 **机器人警报** 🚨\n\n"
+                        "以下资产连续获取报价失败已达到阈值：\n"
+                        f"{details}\n\n请检查行情接口连通性。"
+                    )
                     await context.bot.send_message(
                         chat_id=ADMIN_USER_ID,
-                        text=chunk,
+                        text=admin_message,
                         parse_mode=ParseMode.MARKDOWN,
                     )
-                for code, count in pending.items():
-                    if failure_counts.get(code, 0) >= count:
-                        failure_notified[code] = True
+                    for code, count in batch.items():
+                        if failure_counts.get(code, 0) >= count:
+                            failure_notified[code] = True
                 logger.warning("已向管理员发送数据获取失败的警报通知：%s", ", ".join(pending))
             except Exception as e:
                 logger.error(f"向管理员发送数据获取失败告警时出错: {e}")

@@ -300,7 +300,7 @@ def test_realtime_quote_failures_are_tracked_per_asset_and_notified_once(monkeyp
     assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED] == {"510300": True}
 
 
-def test_realtime_quote_failure_alert_is_split_before_sending(monkeypatch):
+def test_realtime_quote_failure_alert_is_sent_in_bounded_batches(monkeypatch):
     from src import data_fetcher
 
     monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
@@ -319,6 +319,30 @@ def test_realtime_quote_failure_alert_is_split_before_sending(monkeypatch):
     assert all(
         len(call.kwargs["text"]) <= 3800 for call in send_message.await_args_list
     )
+
+
+def test_realtime_quote_failure_alert_resumes_after_partial_delivery(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(data_fetcher, "FETCH_FAILURE_THRESHOLD", 1)
+    monkeypatch.setattr(data_fetcher, "ADMIN_USER_ID", 12345)
+    monkeypatch.setattr(
+        data_fetcher, "_fetch_single_realtime_quote", AsyncMock(return_value=None)
+    )
+    send_message = AsyncMock(side_effect=[None, RuntimeError("telegram down"), None])
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+    codes = [f"{code:06d}" for code in range(75)]
+
+    async def exercise():
+        await data_fetcher._fetch_all_realtime_quotes(context, codes)
+        assert len(context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED]) == 50
+        await data_fetcher._fetch_all_realtime_quotes(context, codes)
+
+    asyncio.run(exercise())
+
+    assert send_message.await_count == 3
+    assert len(context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED]) == 75
 
 
 def test_recovered_quote_is_not_remarked_notified_after_alert_send(monkeypatch):
