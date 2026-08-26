@@ -1,9 +1,10 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pandas as pd
+from telegram.error import RetryAfter
 
 
 def _raw_history():
@@ -112,6 +113,27 @@ def test_production_evaluator_does_not_pass_degraded_history(monkeypatch):
     assert calls and calls[0]["hist_df"] is None
 
 
+def test_opportunity_alert_retries_after_timedelta_retry_after(monkeypatch):
+    from src import jobs
+
+    monkeypatch.setenv("PTB_TIMEDELTA", "true")
+    send_message = AsyncMock(side_effect=[RetryAfter(timedelta(seconds=2)), None])
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
+    sleep = AsyncMock()
+    monkeypatch.setattr(jobs.asyncio, "sleep", sleep)
+    monkeypatch.setattr(jobs, "format_opportunity_alert", lambda *args, **kwargs: "alert")
+
+    result = asyncio.run(
+        jobs._send_opportunity_alert(
+            context, {"user_id": 9}, SimpleNamespace(), "new"
+        )
+    )
+
+    assert result is True
+    assert send_message.await_count == 2
+    sleep.assert_awaited_once_with(3)
+
+
 def test_daily_briefing_keeps_degraded_banner_and_rule_details(monkeypatch):
     from src import jobs
     from src.opportunity import OpportunitySnapshot
@@ -163,6 +185,57 @@ def test_daily_briefing_keeps_degraded_banner_and_rule_details(monkeypatch):
     assert "一个或多个资产的技术数据已降级" in text
     assert "数据：<code>降级</code>" in text
     assert "技术数据：不可用" in text
+
+
+def test_daily_briefing_retries_each_chunk_only_once(monkeypatch):
+    from src import jobs
+    from src.opportunity import OpportunitySnapshot
+
+    monkeypatch.setenv("PTB_TIMEDELTA", "true")
+    rule = {
+        "id": 1,
+        "user_id": 9,
+        "asset_code": "510300",
+        "asset_name": "红利ETF",
+        "benchmark_code": "000922",
+        "benchmark_name": "中证红利",
+    }
+    snapshot = OpportunitySnapshot(
+        rule_id=1,
+        asset_code="510300",
+        asset_name="红利ETF",
+        benchmark_code="000922",
+        benchmark_name="中证红利",
+        snapshot_at="2026-08-24T10:00:00+08:00",
+        total_score=42,
+        level="WATCH",
+        data_quality="OK",
+        technical_price_basis="qfq_realtime",
+    )
+    send_message = AsyncMock(
+        side_effect=[RetryAfter(timedelta(seconds=2)), RetryAfter(timedelta(seconds=2))]
+    )
+    context = SimpleNamespace(
+        bot=SimpleNamespace(send_message=send_message), bot_data={}
+    )
+    monkeypatch.setattr(jobs, "is_trading_day", lambda now: True)
+    monkeypatch.setattr(jobs, "db_execute", Mock(side_effect=[[{"user_id": 9}], [rule]]))
+    monkeypatch.setattr(
+        jobs,
+        "_fetch_all_realtime_quotes",
+        AsyncMock(return_value=({"510300": SimpleNamespace(price=1.453)}, True)),
+    )
+    monkeypatch.setattr(jobs, "_load_opportunity_history", AsyncMock(return_value={}))
+    monkeypatch.setattr(jobs, "evaluate_opportunity", AsyncMock(return_value=snapshot))
+    monkeypatch.setattr(jobs, "save_opportunity_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(jobs, "record_rule_evaluation", lambda *args, **kwargs: None)
+    sleep = AsyncMock()
+    monkeypatch.setattr(jobs.asyncio, "sleep", sleep)
+
+    asyncio.run(jobs.daily_briefing_job(context))
+
+    assert send_message.await_count == 2
+    sleep.assert_awaited_once_with(3)
 
 
 def test_intraday_registration_disabled():

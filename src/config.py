@@ -121,8 +121,8 @@ KEY_HIST_CACHE = 'hist_data_cache'
 KEY_NAME_CACHE = 'name_cache'
 KEY_CACHE_DATE = 'cache_date'
 KEY_HIST_FAILURE_CACHE = 'hist_failure_cache'
-KEY_FAILURE_COUNT = 'fetch_failure_count'
-KEY_FAILURE_SENT = 'failure_notification_sent'
+KEY_QUOTE_FAILURE_COUNTS = 'quote_failure_counts'
+KEY_QUOTE_FAILURE_NOTIFIED = 'quote_failure_notification_sent'
 STOCK_PREFIXES = ('0', '3', '6', '4', '8')
 ETF_PREFIXES = ('5', '1')
 

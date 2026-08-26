@@ -272,6 +272,34 @@ def test_history_cache_single_flight_for_same_asset(monkeypatch):
     fetch_mock.assert_awaited_once()
 
 
+def test_realtime_quote_failures_are_tracked_per_asset_and_notified_once(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(data_fetcher, "FETCH_FAILURE_THRESHOLD", 2)
+    monkeypatch.setattr(data_fetcher, "ADMIN_USER_ID", 12345)
+    quote = data_fetcher.RealtimeQuote(1.0)
+    fetch = AsyncMock(side_effect=[None, None, None, quote, None, quote, None, None])
+    monkeypatch.setattr(data_fetcher, "_fetch_single_realtime_quote", fetch)
+    send_message = AsyncMock(side_effect=[RuntimeError("telegram down"), None, None])
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+
+    async def exercise():
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300", "000922"])
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300", "000922"])
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+
+    asyncio.run(exercise())
+
+    assert send_message.await_count == 3
+    assert "510300" in send_message.await_args.kwargs["text"]
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_COUNTS] == {"510300": 2}
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED] == {"510300": True}
+
+
 def test_qfq_retry_replaces_raw_fallback_and_clears_failure(monkeypatch):
     from src import data_fetcher
 
