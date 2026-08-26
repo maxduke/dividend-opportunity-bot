@@ -413,6 +413,43 @@ def test_concurrent_quote_failures_send_one_admin_alert(monkeypatch):
     assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED] == {"510300": True}
 
 
+def test_overlapping_quote_fetches_preserve_observation_order(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(data_fetcher, "FETCH_FAILURE_THRESHOLD", 2)
+    monkeypatch.setattr(data_fetcher, "ADMIN_USER_ID", None)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fetch_quote(code):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+            return None
+        return data_fetcher.RealtimeQuote(1.0)
+
+    monkeypatch.setattr(data_fetcher, "_fetch_single_realtime_quote", fetch_quote)
+    context = SimpleNamespace(bot_data={})
+
+    async def exercise():
+        first = asyncio.create_task(
+            data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        )
+        await entered.wait()
+        second = asyncio.create_task(
+            data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        )
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(exercise())
+
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_COUNTS] == {}
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED] == {}
+
+
 def test_qfq_retry_replaces_raw_fallback_and_clears_failure(monkeypatch):
     from src import data_fetcher
 

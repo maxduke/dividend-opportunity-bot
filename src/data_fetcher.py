@@ -658,18 +658,18 @@ async def _fetch_all_realtime_quotes(
     codes: List[str],
 ) -> Tuple[Dict[str, RealtimeQuote], bool]:
     """Fetch timestamp-preserving quotes while retaining existing failure state."""
-    quote_dict: Dict[str, RealtimeQuote] = {}
-    for code in codes:
-        await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
-        quote = await _fetch_single_realtime_quote(code)
-        if quote is not None:
-            quote_dict[code] = quote
+    # ponytail: one bot-wide lock; use per-asset locks only if quote throughput matters.
+    fetch_lock = context.bot_data.setdefault("quote_fetch_lock", asyncio.Lock())
+    async with fetch_lock:
+        quote_dict: Dict[str, RealtimeQuote] = {}
+        for code in codes:
+            await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
+            quote = await _fetch_single_realtime_quote(code)
+            if quote is not None:
+                quote_dict[code] = quote
 
-    if not quote_dict and codes:
-        logger.warning("本次未获取到任何有效价格。")
-    # ponytail: one bot-wide lock; per-asset locks only if this section becomes hot.
-    state_lock = context.bot_data.setdefault("quote_failure_state_lock", asyncio.Lock())
-    async with state_lock:
+        if not quote_dict and codes:
+            logger.warning("本次未获取到任何有效价格。")
         failure_counts = context.bot_data.setdefault(KEY_QUOTE_FAILURE_COUNTS, {})
         failure_notified = context.bot_data.setdefault(KEY_QUOTE_FAILURE_NOTIFIED, {})
         for code in codes:
@@ -718,9 +718,9 @@ async def _fetch_all_realtime_quotes(
                 except Exception as e:
                     logger.error(f"向管理员发送数据获取失败告警时出错: {e}")
 
-    if not quote_dict and codes:
-        return {}, False
-    return quote_dict, True
+        if not quote_dict and codes:
+            return {}, False
+        return quote_dict, True
 
 
 # --- RSI 计算 ---
