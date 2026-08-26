@@ -2,6 +2,7 @@
 
 """Telegram handlers for the dividend Opportunity product."""
 
+import asyncio
 import html
 import logging
 import sqlite3
@@ -23,6 +24,8 @@ from .config import (
     KEY_CACHE_DATE,
     KEY_HIST_CACHE,
     KEY_HIST_FAILURE_CACHE,
+    KEY_QUOTE_FAILURE_COUNTS,
+    KEY_QUOTE_FAILURE_NOTIFIED,
     OPPORTUNITY_ALERT_THRESHOLD,
     OPPORTUNITY_LEVEL_LABELS,
     PRICE_ADJUSTMENT,
@@ -177,7 +180,16 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
         sent_message = await update.message.reply_text(
             f"正在验证资产 {asset_code} 与估值基准 {benchmark_code}，请稍候..."
         )
-        quote = await _fetch_single_realtime_quote(asset_code)
+        fetch_lock = context.bot_data.setdefault("quote_fetch_lock", asyncio.Lock())
+        async with fetch_lock:
+            quote = await _fetch_single_realtime_quote(asset_code)
+            if quote is not None:
+                context.bot_data.setdefault(KEY_QUOTE_FAILURE_COUNTS, {}).pop(
+                    asset_code, None
+                )
+                context.bot_data.setdefault(KEY_QUOTE_FAILURE_NOTIFIED, {}).pop(
+                    asset_code, None
+                )
         price = quote.price if quote is not None else None
         if price is None:
             await sent_message.edit_text(f"❌ 无法获取资产 {asset_code} 的实时价格，请确认代码正确。")

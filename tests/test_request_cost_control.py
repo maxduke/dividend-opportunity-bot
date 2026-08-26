@@ -272,6 +272,184 @@ def test_history_cache_single_flight_for_same_asset(monkeypatch):
     fetch_mock.assert_awaited_once()
 
 
+def test_realtime_quote_failures_are_tracked_per_asset_and_notified_once(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(data_fetcher, "FETCH_FAILURE_THRESHOLD", 2)
+    monkeypatch.setattr(data_fetcher, "ADMIN_USER_ID", 12345)
+    quote = data_fetcher.RealtimeQuote(1.0)
+    fetch = AsyncMock(side_effect=[None, None, None, quote, None, quote, None, None])
+    monkeypatch.setattr(data_fetcher, "_fetch_single_realtime_quote", fetch)
+    send_message = AsyncMock(side_effect=[RuntimeError("telegram down"), None, None])
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+
+    async def exercise():
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300", "000922"])
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300", "000922"])
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+
+    asyncio.run(exercise())
+
+    assert send_message.await_count == 3
+    assert "510300" in send_message.await_args.kwargs["text"]
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_COUNTS] == {"510300": 2}
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED] == {"510300": True}
+
+
+def test_realtime_quote_failure_alert_is_sent_in_bounded_batches(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(data_fetcher, "FETCH_FAILURE_THRESHOLD", 1)
+    monkeypatch.setattr(data_fetcher, "ADMIN_USER_ID", 12345)
+    monkeypatch.setattr(
+        data_fetcher, "_fetch_single_realtime_quote", AsyncMock(return_value=None)
+    )
+    send_message = AsyncMock()
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+    codes = [f"{code:06d}" for code in range(200)]
+
+    asyncio.run(data_fetcher._fetch_all_realtime_quotes(context, codes))
+
+    assert send_message.await_count > 1
+    assert all(
+        len(call.kwargs["text"]) <= 3800 for call in send_message.await_args_list
+    )
+
+
+def test_realtime_quote_failure_alert_resumes_after_partial_delivery(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(data_fetcher, "FETCH_FAILURE_THRESHOLD", 1)
+    monkeypatch.setattr(data_fetcher, "ADMIN_USER_ID", 12345)
+    monkeypatch.setattr(
+        data_fetcher, "_fetch_single_realtime_quote", AsyncMock(return_value=None)
+    )
+    send_message = AsyncMock(side_effect=[None, RuntimeError("telegram down"), None])
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+    codes = [f"{code:06d}" for code in range(75)]
+
+    async def exercise():
+        await data_fetcher._fetch_all_realtime_quotes(context, codes)
+        assert len(context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED]) == 50
+        await data_fetcher._fetch_all_realtime_quotes(context, codes)
+
+    asyncio.run(exercise())
+
+    assert send_message.await_count == 3
+    assert len(context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED]) == 75
+
+
+def test_recovered_quote_is_not_remarked_notified_after_alert_send(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(data_fetcher, "FETCH_FAILURE_THRESHOLD", 1)
+    monkeypatch.setattr(data_fetcher, "ADMIN_USER_ID", 12345)
+    monkeypatch.setattr(
+        data_fetcher, "_fetch_single_realtime_quote", AsyncMock(return_value=None)
+    )
+    context = SimpleNamespace(bot_data={})
+
+    async def recover_during_send(*args, **kwargs):
+        if send_message.await_count == 1:
+            context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_COUNTS].pop("510300")
+            context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED].pop("510300", None)
+
+    send_message = AsyncMock(side_effect=recover_during_send)
+    context.bot = SimpleNamespace(send_message=send_message)
+
+    async def exercise():
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        assert "510300" not in context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED]
+        await data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+
+    asyncio.run(exercise())
+
+    assert send_message.await_count == 2
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED] == {"510300": True}
+
+
+def test_concurrent_quote_failures_send_one_admin_alert(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(data_fetcher, "FETCH_FAILURE_THRESHOLD", 1)
+    monkeypatch.setattr(data_fetcher, "ADMIN_USER_ID", 12345)
+    monkeypatch.setattr(
+        data_fetcher, "_fetch_single_realtime_quote", AsyncMock(return_value=None)
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_send(*args, **kwargs):
+        entered.set()
+        await release.wait()
+
+    send_message = AsyncMock(side_effect=blocking_send)
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+
+    async def exercise():
+        first = asyncio.create_task(
+            data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        )
+        await entered.wait()
+        second = asyncio.create_task(
+            data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        )
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(exercise())
+
+    send_message.assert_awaited_once()
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_COUNTS] == {"510300": 2}
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED] == {"510300": True}
+
+
+def test_overlapping_quote_fetches_preserve_observation_order(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(data_fetcher, "FETCH_FAILURE_THRESHOLD", 2)
+    monkeypatch.setattr(data_fetcher, "ADMIN_USER_ID", None)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fetch_quote(code):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+            return None
+        return data_fetcher.RealtimeQuote(1.0)
+
+    monkeypatch.setattr(data_fetcher, "_fetch_single_realtime_quote", fetch_quote)
+    context = SimpleNamespace(bot_data={})
+
+    async def exercise():
+        first = asyncio.create_task(
+            data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        )
+        await entered.wait()
+        second = asyncio.create_task(
+            data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        )
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(exercise())
+
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_COUNTS] == {}
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED] == {}
+
+
 def test_qfq_retry_replaces_raw_fallback_and_clears_failure(monkeypatch):
     from src import data_fetcher
 

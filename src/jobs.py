@@ -13,7 +13,7 @@ import asyncio
 import html
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram.constants import ParseMode
@@ -51,6 +51,13 @@ from .utils import split_message
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _retry_after_seconds(exc: RetryAfter) -> int:
+    retry_after = exc.retry_after
+    if isinstance(retry_after, timedelta):
+        retry_after = retry_after.total_seconds()
+    return int(retry_after) + 1
 
 
 async def _load_opportunity_history(context, codes, now):
@@ -114,7 +121,7 @@ async def _send_opportunity_alert(context, rule, snapshot, reason) -> bool:
         except RetryAfter as exc:
             if attempt:
                 return False
-            wait_seconds = int(getattr(exc, "retry_after", 1)) + 1
+            wait_seconds = _retry_after_seconds(exc)
             logger.warning(
                 "Opportunity 告警触发限流，%s秒后重试。用户: %s",
                 wait_seconds,
@@ -286,9 +293,22 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
             )
         try:
             for chunk in split_message(message):
-                await context.bot.send_message(
-                    chat_id=user_id, text=chunk, parse_mode=ParseMode.HTML
-                )
+                for attempt in range(2):
+                    try:
+                        await context.bot.send_message(
+                            chat_id=user_id, text=chunk, parse_mode=ParseMode.HTML
+                        )
+                        break
+                    except RetryAfter as exc:
+                        if attempt:
+                            raise
+                        wait_seconds = _retry_after_seconds(exc)
+                        logger.warning(
+                            "每日简报触发限流，%s秒后重试。用户: %s",
+                            wait_seconds,
+                            user_id,
+                        )
+                        await asyncio.sleep(wait_seconds)
             logger.info("已成功向用户 %s 发送每日 Opportunity 简报。", user_id)
         except Forbidden:
             logger.warning("无法向用户 %s 发送每日简报，可能已被禁用。", user_id)

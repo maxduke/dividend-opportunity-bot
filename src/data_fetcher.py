@@ -24,11 +24,11 @@ from .config import (
     FETCH_RETRY_DELAY_SECONDS,
     HISTORY_FAILURE_COOLDOWN_MINUTES,
     KEY_CACHE_DATE,
-    KEY_FAILURE_COUNT,
-    KEY_FAILURE_SENT,
     KEY_HIST_CACHE,
     KEY_HIST_FAILURE_CACHE,
     KEY_NAME_CACHE,
+    KEY_QUOTE_FAILURE_COUNTS,
+    KEY_QUOTE_FAILURE_NOTIFIED,
     PRICE_ADJUSTMENT,
     REQUEST_INTERVAL_SECONDS,
     RSI_PERIOD,
@@ -658,32 +658,69 @@ async def _fetch_all_realtime_quotes(
     codes: List[str],
 ) -> Tuple[Dict[str, RealtimeQuote], bool]:
     """Fetch timestamp-preserving quotes while retaining existing failure state."""
-    quote_dict: Dict[str, RealtimeQuote] = {}
-    for code in codes:
-        await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
-        quote = await _fetch_single_realtime_quote(code)
-        if quote is not None:
-            quote_dict[code] = quote
+    # ponytail: one bot-wide lock; use per-asset locks only if quote throughput matters.
+    fetch_lock = context.bot_data.setdefault("quote_fetch_lock", asyncio.Lock())
+    async with fetch_lock:
+        quote_dict: Dict[str, RealtimeQuote] = {}
+        for code in codes:
+            await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
+            quote = await _fetch_single_realtime_quote(code)
+            if quote is not None:
+                quote_dict[code] = quote
 
-    if not quote_dict and codes:
-        logger.warning("本次未获取到任何有效价格。")
-        context.bot_data[KEY_FAILURE_COUNT] = context.bot_data.get(KEY_FAILURE_COUNT, 0) + 1
-        count = context.bot_data[KEY_FAILURE_COUNT]
-        if count >= FETCH_FAILURE_THRESHOLD and not context.bot_data.get(KEY_FAILURE_SENT) and ADMIN_USER_ID:
-            admin_message = f"🚨 **机器人警报** 🚨\n\n连续获取数据失败已达 **{count}** 次。\n请检查新浪接口连通性。"
-            try:
-                await context.bot.send_message(chat_id=ADMIN_USER_ID, text=admin_message, parse_mode=ParseMode.MARKDOWN)
-                logger.warning("已向管理员发送数据获取失败的警报通知。")
-                context.bot_data[KEY_FAILURE_SENT] = True
-            except Exception as e:
-                logger.error(f"向管理员发送数据获取失败告警时出错: {e}")
-        return {}, False
+        if not quote_dict and codes:
+            logger.warning("本次未获取到任何有效价格。")
+        failure_counts = context.bot_data.setdefault(KEY_QUOTE_FAILURE_COUNTS, {})
+        failure_notified = context.bot_data.setdefault(KEY_QUOTE_FAILURE_NOTIFIED, {})
+        for code in codes:
+            if code in quote_dict:
+                if code in failure_counts:
+                    logger.info("数据获取成功，重置 %s 失败计数器。", code)
+                    failure_counts.pop(code, None)
+                failure_notified.pop(code, None)
+            else:
+                failure_counts[code] = failure_counts.get(code, 0) + 1
 
-    if context.bot_data.get(KEY_FAILURE_COUNT, 0) > 0:
-        logger.info("数据获取成功，重置失败计数器。")
-    context.bot_data[KEY_FAILURE_COUNT] = 0
-    context.bot_data[KEY_FAILURE_SENT] = False
-    return quote_dict, True
+        if ADMIN_USER_ID:
+            pending = {
+                code: failure_counts[code]
+                for code in codes
+                if failure_counts.get(code, 0) >= FETCH_FAILURE_THRESHOLD
+                and not failure_notified.get(code, False)
+            }
+            if pending:
+                try:
+                    pending_items = list(pending.items())
+                    # ponytail: 50 six-digit codes stay well below Telegram's limit.
+                    for offset in range(0, len(pending_items), 50):
+                        batch = dict(pending_items[offset:offset + 50])
+                        details = "\n".join(
+                            f"- `{code}`：连续失败 {count} 次"
+                            for code, count in batch.items()
+                        )
+                        admin_message = (
+                            "🚨 **机器人警报** 🚨\n\n"
+                            "以下资产连续获取报价失败已达到阈值：\n"
+                            f"{details}\n\n请检查行情接口连通性。"
+                        )
+                        await context.bot.send_message(
+                            chat_id=ADMIN_USER_ID,
+                            text=admin_message,
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                        for code, count in batch.items():
+                            if failure_counts.get(code, 0) >= count:
+                                failure_notified[code] = True
+                    logger.warning(
+                        "已向管理员发送数据获取失败的警报通知：%s",
+                        ", ".join(pending),
+                    )
+                except Exception as e:
+                    logger.error(f"向管理员发送数据获取失败告警时出错: {e}")
+
+        if not quote_dict and codes:
+            return {}, False
+        return quote_dict, True
 
 
 # --- RSI 计算 ---

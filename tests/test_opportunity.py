@@ -174,6 +174,30 @@ def test_realtime_price_does_not_complete_251_day_history(monkeypatch):
     assert snapshot.drawdown_52w is None
 
 
+def test_implicit_quote_fetch_uses_shared_failure_tracking(monkeypatch):
+    from src.data_fetcher import RealtimeQuote
+
+    history = pd.DataFrame(
+        {"收盘": [100.0] * 300},
+        index=pd.date_range("2025-01-01", periods=300),
+    )
+    quote = RealtimeQuote(101.0)
+    fetch = AsyncMock(return_value=({"510300": quote}, True))
+    monkeypatch.setattr("src.opportunity._fetch_all_realtime_quotes", fetch)
+    monkeypatch.setattr(
+        "src.opportunity.get_cached_valuation",
+        AsyncMock(return_value=None),
+    )
+
+    snapshot = asyncio.run(
+        evaluate_opportunity(_rule(), SimpleNamespace(bot_data={}), hist_df=history)
+    )
+
+    fetch.assert_awaited_once()
+    assert fetch.await_args.args[1] == ["510300"]
+    assert snapshot.spot_price == 101.0
+
+
 def test_unadjusted_etf_fallback_disables_long_term_metrics(monkeypatch):
     history = pd.DataFrame(
         {"收盘": [100.0] * 300},
