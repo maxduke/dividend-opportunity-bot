@@ -42,7 +42,7 @@ from .proxy_health import (
     notify_proxy_health,
     proxy_patch_active,
 )
-from .utils import get_sina_symbol, normalize_hist_df
+from .utils import get_sina_symbol, normalize_hist_df, split_message
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
@@ -690,11 +690,12 @@ async def _fetch_all_realtime_quotes(
                 f"{details}\n\n请检查行情接口连通性。"
             )
             try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_USER_ID,
-                    text=admin_message,
-                    parse_mode=ParseMode.MARKDOWN,
-                )
+                for chunk in split_message(admin_message):
+                    await context.bot.send_message(
+                        chat_id=ADMIN_USER_ID,
+                        text=chunk,
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
                 for code in pending:
                     failure_notified[code] = True
                 logger.warning("已向管理员发送数据获取失败的警报通知：%s", ", ".join(pending))
