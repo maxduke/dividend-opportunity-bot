@@ -659,55 +659,64 @@ async def _fetch_all_realtime_quotes(
 ) -> Tuple[Dict[str, RealtimeQuote], bool]:
     """Fetch timestamp-preserving quotes while retaining existing failure state."""
     quote_dict: Dict[str, RealtimeQuote] = {}
-    failure_counts = context.bot_data.setdefault(KEY_QUOTE_FAILURE_COUNTS, {})
-    failure_notified = context.bot_data.setdefault(KEY_QUOTE_FAILURE_NOTIFIED, {})
     for code in codes:
         await asyncio.sleep(REQUEST_INTERVAL_SECONDS)
         quote = await _fetch_single_realtime_quote(code)
         if quote is not None:
             quote_dict[code] = quote
-            if code in failure_counts:
-                logger.info("数据获取成功，重置 %s 失败计数器。", code)
-                failure_counts.pop(code, None)
-            failure_notified.pop(code, None)
-        else:
-            failure_counts[code] = failure_counts.get(code, 0) + 1
 
     if not quote_dict and codes:
         logger.warning("本次未获取到任何有效价格。")
-    if ADMIN_USER_ID:
-        pending = {
-            code: failure_counts[code]
-            for code in codes
-            if failure_counts.get(code, 0) >= FETCH_FAILURE_THRESHOLD
-            and not failure_notified.get(code, False)
-        }
-        if pending:
-            try:
-                pending_items = list(pending.items())
-                # ponytail: 50 six-digit codes stay well below Telegram's limit.
-                for offset in range(0, len(pending_items), 50):
-                    batch = dict(pending_items[offset:offset + 50])
-                    details = "\n".join(
-                        f"- `{code}`：连续失败 {count} 次"
-                        for code, count in batch.items()
+    # ponytail: one bot-wide lock; per-asset locks only if this section becomes hot.
+    state_lock = context.bot_data.setdefault("quote_failure_state_lock", asyncio.Lock())
+    async with state_lock:
+        failure_counts = context.bot_data.setdefault(KEY_QUOTE_FAILURE_COUNTS, {})
+        failure_notified = context.bot_data.setdefault(KEY_QUOTE_FAILURE_NOTIFIED, {})
+        for code in codes:
+            if code in quote_dict:
+                if code in failure_counts:
+                    logger.info("数据获取成功，重置 %s 失败计数器。", code)
+                    failure_counts.pop(code, None)
+                failure_notified.pop(code, None)
+            else:
+                failure_counts[code] = failure_counts.get(code, 0) + 1
+
+        if ADMIN_USER_ID:
+            pending = {
+                code: failure_counts[code]
+                for code in codes
+                if failure_counts.get(code, 0) >= FETCH_FAILURE_THRESHOLD
+                and not failure_notified.get(code, False)
+            }
+            if pending:
+                try:
+                    pending_items = list(pending.items())
+                    # ponytail: 50 six-digit codes stay well below Telegram's limit.
+                    for offset in range(0, len(pending_items), 50):
+                        batch = dict(pending_items[offset:offset + 50])
+                        details = "\n".join(
+                            f"- `{code}`：连续失败 {count} 次"
+                            for code, count in batch.items()
+                        )
+                        admin_message = (
+                            "🚨 **机器人警报** 🚨\n\n"
+                            "以下资产连续获取报价失败已达到阈值：\n"
+                            f"{details}\n\n请检查行情接口连通性。"
+                        )
+                        await context.bot.send_message(
+                            chat_id=ADMIN_USER_ID,
+                            text=admin_message,
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                        for code, count in batch.items():
+                            if failure_counts.get(code, 0) >= count:
+                                failure_notified[code] = True
+                    logger.warning(
+                        "已向管理员发送数据获取失败的警报通知：%s",
+                        ", ".join(pending),
                     )
-                    admin_message = (
-                        "🚨 **机器人警报** 🚨\n\n"
-                        "以下资产连续获取报价失败已达到阈值：\n"
-                        f"{details}\n\n请检查行情接口连通性。"
-                    )
-                    await context.bot.send_message(
-                        chat_id=ADMIN_USER_ID,
-                        text=admin_message,
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
-                    for code, count in batch.items():
-                        if failure_counts.get(code, 0) >= count:
-                            failure_notified[code] = True
-                logger.warning("已向管理员发送数据获取失败的警报通知：%s", ", ".join(pending))
-            except Exception as e:
-                logger.error(f"向管理员发送数据获取失败告警时出错: {e}")
+                except Exception as e:
+                    logger.error(f"向管理员发送数据获取失败告警时出错: {e}")
 
     if not quote_dict and codes:
         return {}, False

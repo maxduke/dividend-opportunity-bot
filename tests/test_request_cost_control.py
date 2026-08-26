@@ -375,6 +375,44 @@ def test_recovered_quote_is_not_remarked_notified_after_alert_send(monkeypatch):
     assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED] == {"510300": True}
 
 
+def test_concurrent_quote_failures_send_one_admin_alert(monkeypatch):
+    from src import data_fetcher
+
+    monkeypatch.setattr(data_fetcher, "REQUEST_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(data_fetcher, "FETCH_FAILURE_THRESHOLD", 1)
+    monkeypatch.setattr(data_fetcher, "ADMIN_USER_ID", 12345)
+    monkeypatch.setattr(
+        data_fetcher, "_fetch_single_realtime_quote", AsyncMock(return_value=None)
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_send(*args, **kwargs):
+        entered.set()
+        await release.wait()
+
+    send_message = AsyncMock(side_effect=blocking_send)
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+
+    async def exercise():
+        first = asyncio.create_task(
+            data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        )
+        await entered.wait()
+        second = asyncio.create_task(
+            data_fetcher._fetch_all_realtime_quotes(context, ["510300"])
+        )
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(exercise())
+
+    send_message.assert_awaited_once()
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_COUNTS] == {"510300": 2}
+    assert context.bot_data[data_fetcher.KEY_QUOTE_FAILURE_NOTIFIED] == {"510300": True}
+
+
 def test_qfq_retry_replaces_raw_fallback_and_clears_failure(monkeypatch):
     from src import data_fetcher
 
