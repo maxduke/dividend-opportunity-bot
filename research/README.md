@@ -42,6 +42,8 @@ python scripts/research_csi_dp2.py \
 
 `--refresh` ignores existing cached payloads. `--direct-csi-check` explicitly enables a live AKShare/CSI overlap comparison; it is disabled by default and cannot be used with `--offline`. Timeline payloads are used first. A post detail request is made only for a potentially relevant post whose timeline text lacks a required date or yield.
 
+Detail requests returning HTTP 404 leave a `post-ID.not-found` negative-cache marker. Later online and offline runs reuse that marker without requesting the deleted post again; `--refresh` retries it and removes the marker after a successful response. If the run is interrupted with Ctrl-C, fetched cache files are retained and the same command can be rerun to continue.
+
 ## Research container
 
 The separately tagged research image defaults to this CLI rather than the Telegram bot. Run it as the host user so a mode-`600` cookie remains readable without loosening permissions, and mount the cookie read-only:

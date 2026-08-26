@@ -158,6 +158,59 @@ def test_not_found_detail_is_permanent_and_not_retried(tmp_path):
     assert sleeps == []
 
 
+def test_not_found_detail_is_negative_cached_across_clients_and_offline(tmp_path):
+    session = Session([Response(404)])
+    xueqiu, _ = client(tmp_path, session)
+
+    with pytest.raises(NotFoundError):
+        xueqiu.fetch_detail("deleted-post")
+
+    marker = tmp_path / "cache/post-deleted-post.not-found"
+    assert marker.read_bytes() == b"not-found\n"
+    assert not (tmp_path / "cache/post-deleted-post.json").exists()
+
+    cached_session = Session([Response(200, {"id": "deleted-post"})])
+    cached, _ = client(tmp_path, cached_session)
+    with pytest.raises(NotFoundError):
+        cached.fetch_detail("deleted-post")
+    assert cached_session.calls == []
+
+    offline_session = Session([Response(200, {"id": "deleted-post"})])
+    offline, _ = client(tmp_path, offline_session, offline=True)
+    with pytest.raises(NotFoundError):
+        offline.fetch_detail("deleted-post")
+    assert offline_session.calls == []
+
+
+def test_refresh_retries_negative_cached_detail_and_removes_marker(tmp_path):
+    first, _ = client(tmp_path, Session([Response(404)]))
+    with pytest.raises(NotFoundError):
+        first.fetch_detail("deleted-post")
+
+    session = Session([Response(200, {"id": "deleted-post", "text": "restored"})])
+    refreshed, _ = client(tmp_path, session, refresh=True)
+    assert refreshed.fetch_detail("deleted-post") == {
+        "id": "deleted-post",
+        "text": "restored",
+    }
+    assert not (tmp_path / "cache/post-deleted-post.not-found").exists()
+    assert (tmp_path / "cache/post-deleted-post.json").exists()
+
+
+def test_successful_detail_cache_wins_over_stale_not_found_marker(tmp_path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "post-restored.json").write_text(
+        '{"id": "restored", "text": "available"}', encoding="utf-8"
+    )
+    (cache_dir / "post-restored.not-found").write_text("not-found\n", encoding="utf-8")
+    session = Session()
+    cached, _ = client(tmp_path, session)
+
+    assert cached.fetch_detail("restored")["text"] == "available"
+    assert session.calls == []
+
+
 def test_malformed_json_is_clear_and_not_cached(tmp_path):
     session = Session([Response(200, error=ValueError("not json"))])
     xueqiu, _ = client(tmp_path, session)

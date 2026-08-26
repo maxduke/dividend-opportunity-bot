@@ -89,6 +89,19 @@ def test_cli_defaults_and_invalid_network_combinations():
     assert research_csi_dp2.main(["--offline", "--direct-csi-check"]) == 1
 
 
+def test_cli_keyboard_interrupt_keeps_cache_and_returns_130(monkeypatch, capsys):
+    def interrupted(_args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(research_csi_dp2, "run", interrupted)
+
+    assert research_csi_dp2.main([]) == 130
+    captured = capsys.readouterr()
+    assert "cached responses were retained" in captured.err
+    assert "Re-run to continue" in captured.err
+    assert captured.out == ""
+
+
 def test_research_code_has_no_production_import_or_sql_write():
     root = Path(__file__).resolve().parents[2]
     files = [root / "scripts/research_csi_dp2.py", *sorted((root / "research/csi_dp2").glob("*.py"))]

@@ -84,7 +84,8 @@ class XueqiuClient:
 
     ``cache_dir`` is the account-specific directory for provider payloads.  A
     timeline page is stored as ``timeline-page-NNNN.json`` and a detail
-    response as ``post-ID.json``.  Only decoded provider JSON is written.
+    response as ``post-ID.json``.  Deleted detail posts also leave a separate
+    ``post-ID.not-found`` marker, never a fake provider response.
     """
 
     def __init__(
@@ -173,6 +174,9 @@ class XueqiuClient:
     def _detail_path(self, post_id: str) -> Path:
         return self.cache_dir / f"post-{post_id}.json"
 
+    def _detail_not_found_path(self, post_id: str) -> Path:
+        return self.cache_dir / f"post-{post_id}.not-found"
+
     def _read_cache(self, path: Path) -> Any:
         try:
             with path.open("r", encoding="utf-8") as handle:
@@ -198,6 +202,40 @@ class XueqiuClient:
             except OSError:
                 pass
             raise CacheError(f"could not write raw response: {path.name}") from exc
+
+    def _raise_if_not_found_marker(self, path: Path, *, refresh: bool) -> None:
+        if refresh:
+            return
+        try:
+            path.read_bytes()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise CacheError(f"could not read not-found marker: {path.name}") from exc
+        raise NotFoundError("cached Xueqiu post was not found")
+
+    def _write_not_found_marker(self, path: Path) -> None:
+        temporary = path.with_name(f".{path.name}.tmp")
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            with temporary.open("wb") as handle:
+                handle.write(b"not-found\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except OSError as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise CacheError(f"could not write not-found marker: {path.name}") from exc
+
+    @staticmethod
+    def _remove_not_found_marker(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise CacheError(f"could not remove not-found marker: {path.name}") from exc
 
     def _wait_for_request(self) -> None:
         if self._last_request_at is None:
@@ -264,17 +302,27 @@ class XueqiuClient:
         *,
         offline: bool,
         refresh: bool,
+        not_found_path: Path | None = None,
     ) -> Any:
-        if offline:
-            return self._read_cache(path)
         if not refresh:
             try:
                 return self._read_cache(path)
             except CacheMissError:
                 pass
-        payload = self._request_json(url, params)
+            if not_found_path is not None:
+                self._raise_if_not_found_marker(not_found_path, refresh=False)
+        if offline:
+            return self._read_cache(path)
+        try:
+            payload = self._request_json(url, params)
+        except NotFoundError:
+            if not_found_path is not None:
+                self._write_not_found_marker(not_found_path)
+            raise
         # The cache write is deliberately before returning to the parser.
         self._write_cache(path, payload)
+        if not_found_path is not None:
+            self._remove_not_found_marker(not_found_path)
         return payload
 
     @staticmethod
@@ -381,6 +429,7 @@ class XueqiuClient:
             {"id": normalized_id},
             offline=use_offline,
             refresh=use_refresh,
+            not_found_path=self._detail_not_found_path(normalized_id),
         )
 
     def close(self) -> None:

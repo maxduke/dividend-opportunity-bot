@@ -179,6 +179,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         decision, output_dir = run(args)
+    except KeyboardInterrupt:
+        print("Interrupted; cached responses were retained. Re-run to continue.", file=sys.stderr)
+        return 130
     except (OSError, RuntimeError, ValueError, XueqiuClientError) as exc:
         logger.error("CSI D/P2 research failed: %s", exc)
         return 1
