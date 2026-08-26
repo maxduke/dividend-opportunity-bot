@@ -44,13 +44,13 @@ python scripts/research_csi_dp2.py \
 
 ## Research container
 
-The separately tagged research image defaults to this CLI rather than the Telegram bot. On the host, prepare writable cache/output directories for the image's unprivileged UID and mount the cookie read-only:
+The separately tagged research image defaults to this CLI rather than the Telegram bot. Run it as the host user so a mode-`600` cookie remains readable without loosening permissions, and mount the cookie read-only:
 
 ```bash
 mkdir -p research-run/cache research-run/output
-sudo chown -R 10001:10001 research-run
 
 docker run --rm \
+  --user "$(id -u):$(id -g)" \
   -v ~/.config/dividend-opportunity-bot/xueqiu.cookie:/run/secrets/xueqiu.cookie:ro \
   -v "$PWD/research-run/cache:/work/cache" \
   -v "$PWD/research-run/output:/work/output" \
