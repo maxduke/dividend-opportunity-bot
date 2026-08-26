@@ -49,9 +49,7 @@ async def ensure_trade_days_loaded(check_date: datetime | None = None) -> None:
     """Refresh the provider calendar without blocking the event loop."""
     target = check_date or datetime.now(SHANGHAI_TZ)
     cn_date = target.astimezone(SHANGHAI_TZ).date() if target.tzinfo else target.date()
-    if cn_date.weekday() >= 5 or (
-        LOCAL_CALENDAR_COVERAGE_START <= cn_date <= LOCAL_CALENDAR_COVERAGE_END
-    ):
+    if LOCAL_CALENDAR_COVERAGE_START <= cn_date <= LOCAL_CALENDAR_COVERAGE_END:
         return
 
     now = datetime.now(SHANGHAI_TZ)

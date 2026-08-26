@@ -98,6 +98,24 @@ def test_async_calendar_preload_is_single_flight(monkeypatch):
     assert calls == 1
 
 
+def test_async_calendar_preload_loads_out_of_range_weekend(monkeypatch):
+    import asyncio
+
+    check_date = datetime(2026, 8, 23, tzinfo=ZoneInfo("Asia/Shanghai"))
+    provider = Mock(return_value={check_date.date()})
+    monkeypatch.setattr(market, "_load_trade_days_from_ak", provider)
+    monkeypatch.setattr(
+        market,
+        "_trade_day_cache",
+        {"days": None, "loaded_on": None, "failed_at": None},
+    )
+    monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
+
+    asyncio.run(market.ensure_trade_days_loaded(check_date))
+
+    provider.assert_called_once()
+
+
 def test_async_calendar_preload_times_out_without_blocking(monkeypatch):
     import asyncio
 
