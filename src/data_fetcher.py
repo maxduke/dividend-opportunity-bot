@@ -696,8 +696,9 @@ async def _fetch_all_realtime_quotes(
                         text=chunk,
                         parse_mode=ParseMode.MARKDOWN,
                     )
-                for code in pending:
-                    failure_notified[code] = True
+                for code, count in pending.items():
+                    if failure_counts.get(code, 0) >= count:
+                        failure_notified[code] = True
                 logger.warning("已向管理员发送数据获取失败的警报通知：%s", ", ".join(pending))
             except Exception as e:
                 logger.error(f"向管理员发送数据获取失败告警时出错: {e}")
