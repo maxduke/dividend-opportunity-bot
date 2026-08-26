@@ -1,8 +1,12 @@
 import asyncio
+import sqlite3
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from unittest.mock import Mock
 from zoneinfo import ZoneInfo
+
+import pytest
 
 
 def test_refresh_clears_history_cache_failure_state_and_date():
@@ -73,3 +77,66 @@ def test_proxy_status_refresh_requires_restart_without_hot_install(monkeypatch):
     assert "补丁已启用：否" in text
     assert "请重启 Bot 以安全启用。" in text
     assert "secret-token" not in text
+
+
+def test_briefing_write_propagates_database_failure(monkeypatch):
+    from src import handlers
+
+    def fail(*args, **kwargs):
+        assert kwargs["swallow_errors"] is False
+        raise sqlite3.OperationalError("disk full")
+
+    monkeypatch.setattr(handlers, "db_execute", fail)
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=9),
+        message=SimpleNamespace(reply_text=AsyncMock()),
+    )
+    context = SimpleNamespace(args=["on"])
+
+    with pytest.raises(sqlite3.OperationalError, match="disk full"):
+        asyncio.run(handlers.briefing_command.__wrapped__(update, context))
+    update.message.reply_text.assert_not_awaited()
+
+
+def test_addop_initial_snapshot_is_critical(monkeypatch):
+    from src import handlers
+
+    reply = AsyncMock()
+    sent_message = SimpleNamespace(edit_text=AsyncMock())
+    reply.return_value = sent_message
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=9),
+        message=SimpleNamespace(reply_text=reply),
+    )
+    context = SimpleNamespace(args=["510300", "000922"], bot_data={})
+    db_results = iter([None, {"id": 7}])
+    snapshot = SimpleNamespace(total_score=72, level="STRONG")
+    save = Mock()
+
+    def fake_db_execute(query, *args, **kwargs):
+        if query.lstrip().startswith("SELECT"):
+            return next(db_results)
+        return None
+
+    monkeypatch.setattr(handlers, "db_execute", fake_db_execute)
+    monkeypatch.setattr(
+        handlers,
+        "_fetch_single_realtime_quote",
+        AsyncMock(return_value=SimpleNamespace(price=100)),
+    )
+    monkeypatch.setattr(
+        handlers,
+        "get_cached_valuation",
+        AsyncMock(
+            return_value={"dividend_yield2": 5, "benchmark_name": "中证红利"}
+        ),
+    )
+    monkeypatch.setattr(handlers, "backfill_cn10y", AsyncMock())
+    monkeypatch.setattr(handlers, "get_asset_name_with_cache", AsyncMock(return_value="红利ETF"))
+    monkeypatch.setattr(handlers, "evaluate_opportunity", AsyncMock(return_value=snapshot))
+    monkeypatch.setattr(handlers, "save_opportunity_snapshot", save)
+    monkeypatch.setattr(handlers, "record_rule_evaluation", Mock())
+
+    asyncio.run(handlers.add_opportunity_rule_command.__wrapped__(update, context))
+
+    save.assert_called_once_with(snapshot, critical=True)

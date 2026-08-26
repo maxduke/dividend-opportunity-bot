@@ -131,3 +131,32 @@ def test_db_preflight_rejects_readonly_existing_file(monkeypatch, tmp_path):
     assert f"directory={tmp_path.resolve()}" in message
     assert "database file is not readable/writable" in message
     assert "10001:10001" in message
+
+
+def test_db_executemany_rolls_back_and_propagates_failure(monkeypatch, tmp_path):
+    from src import database
+
+    _close_database(database)
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "rules.db"))
+    database.db_execute("CREATE TABLE items (value INTEGER UNIQUE)")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        database.db_executemany("INSERT INTO items (value) VALUES (?)", [(1,), (1,)])
+
+    assert database.db_execute("SELECT COUNT(*) AS n FROM items", fetchone=True)["n"] == 0
+    _close_database(database)
+
+
+def test_whitelist_writes_are_critical(monkeypatch):
+    from src import database
+
+    calls = []
+
+    def fake_db_execute(*args, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(database, "db_execute", fake_db_execute)
+    database.add_to_whitelist(1)
+    database.remove_from_whitelist(1)
+
+    assert [call["swallow_errors"] for call in calls] == [False, False]

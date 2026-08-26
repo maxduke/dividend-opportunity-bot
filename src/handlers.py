@@ -237,7 +237,7 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
         )
         created_rule_id = rule["id"]
         snapshot = await evaluate_opportunity(rule, context, quote=quote, spot_price=price)
-        save_opportunity_snapshot(snapshot)
+        save_opportunity_snapshot(snapshot, critical=True)
         record_rule_evaluation(rule["id"], snapshot)
         creation_complete = True
         await sent_message.edit_text(
@@ -416,10 +416,18 @@ async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     command = context.args[0].lower()
     if command == "on":
-        db_execute("UPDATE whitelist SET daily_briefing_enabled = 1 WHERE user_id = ?", (user_id,))
+        db_execute(
+            "UPDATE whitelist SET daily_briefing_enabled = 1 WHERE user_id = ?",
+            (user_id,),
+            swallow_errors=False,
+        )
         await update.message.reply_text("✅ 已为您开启每日收盘前简报功能。")
     elif command == "off":
-        db_execute("UPDATE whitelist SET daily_briefing_enabled = 0 WHERE user_id = ?", (user_id,))
+        db_execute(
+            "UPDATE whitelist SET daily_briefing_enabled = 0 WHERE user_id = ?",
+            (user_id,),
+            swallow_errors=False,
+        )
         await update.message.reply_text("✅ 已为您关闭每日收盘前简报功能。")
     else:
         await update.message.reply_text("指令格式错误。请使用 /briefing on 或 /briefing off。")

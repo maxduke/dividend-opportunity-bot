@@ -3,6 +3,7 @@
 import logging
 import math
 import os
+import re
 import sys
 
 # --- 日志配置 ---
@@ -15,55 +16,105 @@ for _logger_name in ("httpx", "telegram.ext", "apscheduler"):
 
 logger = logging.getLogger(__name__)
 
+_CONFIG_PARSE_ERRORS = []
+_ASCII_INT_RE = re.compile(r"^[+-]?[0-9]+$")
+
+
+def _parse_int(name, default):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not _ASCII_INT_RE.fullmatch(value):
+        message = f"{name} 必须是 ASCII 整数，当前值: {raw!r}"
+        _CONFIG_PARSE_ERRORS.append(message)
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        message = f"{name} 不是合法整数，当前值: {raw!r}"
+        _CONFIG_PARSE_ERRORS.append(message)
+        return default
+
+
+def _parse_float(name, default):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    if not raw.strip().isascii():
+        message = f"{name} 必须使用 ASCII 数字，当前值: {raw!r}"
+        _CONFIG_PARSE_ERRORS.append(message)
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        message = f"{name} 必须是数字，当前值: {raw!r}"
+        _CONFIG_PARSE_ERRORS.append(message)
+        return default
+    if not math.isfinite(value):
+        message = f"{name} 必须是有限数字，当前值: {raw!r}"
+        _CONFIG_PARSE_ERRORS.append(message)
+        return default
+    return value
+
+
+def _parse_bool(name, default=False):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    message = f"{name} 只能是 true 或 false，当前值: {raw!r}"
+    _CONFIG_PARSE_ERRORS.append(message)
+    return default
+
 # --- 机器人配置 (从环境变量读取) ---
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-ADMIN_USER_ID_STR = os.getenv('ADMIN_USER_ID')
-ADMIN_USER_ID = int(ADMIN_USER_ID_STR) if ADMIN_USER_ID_STR and ADMIN_USER_ID_STR.isdigit() else None
-CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', '60'))
+ADMIN_USER_ID = _parse_int('ADMIN_USER_ID', None)
+CHECK_INTERVAL_SECONDS = _parse_int('CHECK_INTERVAL_SECONDS', 60)
 DB_FILE = os.getenv('DB_FILE', 'rules.db')
 
 # --- 监控参数配置 ---
-RSI_PERIOD = int(os.getenv('RSI_PERIOD', '6'))
+RSI_PERIOD = _parse_int('RSI_PERIOD', 6)
 # Opportunity technical history is always forward-adjusted.  This is a
 # correctness invariant, not an end-user scoring switch.
 PRICE_ADJUSTMENT = 'qfq'
-TECHNICAL_HISTORY_DAYS = int(os.getenv('TECHNICAL_HISTORY_DAYS', '550'))
-ENABLE_INTRADAY_MONITOR = os.getenv('ENABLE_INTRADAY_MONITOR', 'false').lower() == 'true'
-VALUATION_CACHE_HOURS = float(os.getenv('VALUATION_CACHE_HOURS', '12'))
-BOND_CACHE_HOURS = float(os.getenv('BOND_CACHE_HOURS', '12'))
-VALUATION_STALE_MAX_TRADING_DAYS = int(os.getenv('VALUATION_STALE_MAX_TRADING_DAYS', '3'))
-VALUATION_PERCENTILE_MIN_OBS = int(os.getenv('VALUATION_PERCENTILE_MIN_OBS', '252'))
-VALUATION_PERCENTILE_MIN_SPAN_YEARS = float(os.getenv('VALUATION_PERCENTILE_MIN_SPAN_YEARS', '2.0'))
-VALUATION_PERCENTILE_LOOKBACK_YEARS = int(os.getenv('VALUATION_PERCENTILE_LOOKBACK_YEARS', '5'))
+TECHNICAL_HISTORY_DAYS = _parse_int('TECHNICAL_HISTORY_DAYS', 550)
+ENABLE_INTRADAY_MONITOR = _parse_bool('ENABLE_INTRADAY_MONITOR')
+VALUATION_CACHE_HOURS = _parse_float('VALUATION_CACHE_HOURS', 12.0)
+BOND_CACHE_HOURS = _parse_float('BOND_CACHE_HOURS', 12.0)
+VALUATION_STALE_MAX_TRADING_DAYS = _parse_int('VALUATION_STALE_MAX_TRADING_DAYS', 3)
+VALUATION_PERCENTILE_MIN_OBS = _parse_int('VALUATION_PERCENTILE_MIN_OBS', 252)
+VALUATION_PERCENTILE_MIN_SPAN_YEARS = _parse_float('VALUATION_PERCENTILE_MIN_SPAN_YEARS', 2.0)
+VALUATION_PERCENTILE_LOOKBACK_YEARS = _parse_int('VALUATION_PERCENTILE_LOOKBACK_YEARS', 5)
 CSI_DIVIDEND_YIELD_FIELD = os.getenv('CSI_DIVIDEND_YIELD_FIELD', '股息率2')
-OPPORTUNITY_ALERT_THRESHOLD = float(os.getenv('OPPORTUNITY_ALERT_THRESHOLD', '60'))
-MIN_VALUATION_SCORE_FOR_OPPORTUNITY = float(os.getenv('MIN_VALUATION_SCORE_FOR_OPPORTUNITY', '20'))
-OPPORTUNITY_ALERT_COOLDOWN_MINUTES = int(os.getenv('OPPORTUNITY_ALERT_COOLDOWN_MINUTES', '240'))
-OPPORTUNITY_MAX_ALERTS_PER_DAY = int(os.getenv('OPPORTUNITY_MAX_ALERTS_PER_DAY', '1'))
+OPPORTUNITY_ALERT_THRESHOLD = _parse_float('OPPORTUNITY_ALERT_THRESHOLD', 60.0)
+MIN_VALUATION_SCORE_FOR_OPPORTUNITY = _parse_float('MIN_VALUATION_SCORE_FOR_OPPORTUNITY', 20.0)
+OPPORTUNITY_ALERT_COOLDOWN_MINUTES = _parse_int('OPPORTUNITY_ALERT_COOLDOWN_MINUTES', 240)
+OPPORTUNITY_MAX_ALERTS_PER_DAY = _parse_int('OPPORTUNITY_MAX_ALERTS_PER_DAY', 1)
 
 # --- 高级配置 ---
-FETCH_FAILURE_THRESHOLD = int(os.getenv('FETCH_FAILURE_THRESHOLD', '5'))
-REQUEST_INTERVAL_SECONDS = float(os.getenv('REQUEST_INTERVAL_SECONDS', '1.0'))
+FETCH_FAILURE_THRESHOLD = _parse_int('FETCH_FAILURE_THRESHOLD', 5)
+REQUEST_INTERVAL_SECONDS = _parse_float('REQUEST_INTERVAL_SECONDS', 1.0)
 BRIEFING_TIMES_STR = os.getenv('DAILY_BRIEFING_TIMES', '14:50')
-FETCH_RETRY_ATTEMPTS = int(os.getenv('FETCH_RETRY_ATTEMPTS', '3'))
-FETCH_RETRY_DELAY_SECONDS = int(os.getenv('FETCH_RETRY_DELAY_SECONDS', '5'))
-AKSHARE_CALL_TIMEOUT_SECONDS = float(os.getenv('AKSHARE_CALL_TIMEOUT_SECONDS', '15'))
-AKSHARE_PROXY_CALL_TIMEOUT_SECONDS = float(os.getenv('AKSHARE_PROXY_CALL_TIMEOUT_SECONDS', '300'))
-HISTORY_FAILURE_COOLDOWN_MINUTES = float(os.getenv('HISTORY_FAILURE_COOLDOWN_MINUTES', '30'))
-ENABLE_AKSHARE_PROXY_PATCH = os.getenv('ENABLE_AKSHARE_PROXY_PATCH', 'false').lower() == 'true'
+FETCH_RETRY_ATTEMPTS = _parse_int('FETCH_RETRY_ATTEMPTS', 3)
+FETCH_RETRY_DELAY_SECONDS = _parse_int('FETCH_RETRY_DELAY_SECONDS', 5)
+AKSHARE_CALL_TIMEOUT_SECONDS = _parse_float('AKSHARE_CALL_TIMEOUT_SECONDS', 15.0)
+AKSHARE_PROXY_CALL_TIMEOUT_SECONDS = _parse_float('AKSHARE_PROXY_CALL_TIMEOUT_SECONDS', 300.0)
+HISTORY_FAILURE_COOLDOWN_MINUTES = _parse_float('HISTORY_FAILURE_COOLDOWN_MINUTES', 30.0)
+ENABLE_AKSHARE_PROXY_PATCH = _parse_bool('ENABLE_AKSHARE_PROXY_PATCH')
 AKSHARE_PROXY_AUTH_IP = os.getenv('AKSHARE_PROXY_AUTH_IP', '101.201.173.125').strip()
 AKSHARE_PROXY_AUTH_TOKEN = os.getenv('AKSHARE_PROXY_AUTH_TOKEN', '').strip()
-AKSHARE_PROXY_RETRY = int(os.getenv('AKSHARE_PROXY_RETRY', '30'))
+AKSHARE_PROXY_RETRY = _parse_int('AKSHARE_PROXY_RETRY', 30)
 AKSHARE_PROXY_HOOK_DOMAINS = os.getenv(
     'AKSHARE_PROXY_HOOK_DOMAINS',
     'push2.eastmoney.com,push2his.eastmoney.com',
 )
-AKSHARE_PROXY_BALANCE_CACHE_MINUTES = float(
-    os.getenv('AKSHARE_PROXY_BALANCE_CACHE_MINUTES', '30')
-)
-AKSHARE_PROXY_LOW_BALANCE_THRESHOLD = float(
-    os.getenv('AKSHARE_PROXY_LOW_BALANCE_THRESHOLD', '0')
-)
+AKSHARE_PROXY_BALANCE_CACHE_MINUTES = _parse_float('AKSHARE_PROXY_BALANCE_CACHE_MINUTES', 30.0)
+AKSHARE_PROXY_LOW_BALANCE_THRESHOLD = _parse_float('AKSHARE_PROXY_LOW_BALANCE_THRESHOLD', 0.0)
 
 # --- 应用内常量 ---
 KEY_HIST_CACHE = 'hist_data_cache'
@@ -112,13 +163,24 @@ PROXY_STATE_LABELS = {
 }
 
 
+def _valid_briefing_time(value):
+    parts = value.split(':')
+    if len(parts) != 2 or not all(re.fullmatch(r'[0-9]+', part) for part in parts):
+        return False
+    try:
+        hour, minute = (int(part) for part in parts)
+    except ValueError:
+        return False
+    return 0 <= hour <= 23 and 0 <= minute <= 59
+
+
 def validate_config():
     """验证关键配置值的合法性，不合法则退出。"""
-    errors = []
+    errors = list(_CONFIG_PARSE_ERRORS)
 
     if not TELEGRAM_TOKEN:
         errors.append("TELEGRAM_TOKEN 未设置")
-    if not ADMIN_USER_ID:
+    if ADMIN_USER_ID is None or ADMIN_USER_ID <= 0:
         errors.append("ADMIN_USER_ID 未设置或不是合法的正整数")
 
     if CHECK_INTERVAL_SECONDS <= 0:
@@ -168,6 +230,17 @@ def validate_config():
         errors.append(f"REQUEST_INTERVAL_SECONDS 必须 >= 0，当前值: {REQUEST_INTERVAL_SECONDS}")
     if FETCH_RETRY_ATTEMPTS < 1:
         errors.append(f"FETCH_RETRY_ATTEMPTS 必须 >= 1，当前值: {FETCH_RETRY_ATTEMPTS}")
+    if FETCH_FAILURE_THRESHOLD < 1:
+        errors.append(f"FETCH_FAILURE_THRESHOLD 必须 >= 1，当前值: {FETCH_FAILURE_THRESHOLD}")
+    if FETCH_RETRY_DELAY_SECONDS < 0:
+        errors.append(f"FETCH_RETRY_DELAY_SECONDS 必须 >= 0，当前值: {FETCH_RETRY_DELAY_SECONDS}")
+    if BRIEFING_TIMES_STR.strip():
+        for time_str in BRIEFING_TIMES_STR.split(','):
+            time_str = time_str.strip()
+            if not _valid_briefing_time(time_str):
+                errors.append(
+                    f"DAILY_BRIEFING_TIMES 包含无效时间: {time_str!r}，应为 24 小时制 小时:分钟"
+                )
     if AKSHARE_CALL_TIMEOUT_SECONDS <= 0:
         errors.append(f"AKSHARE_CALL_TIMEOUT_SECONDS 必须 > 0，当前值: {AKSHARE_CALL_TIMEOUT_SECONDS}")
     if AKSHARE_PROXY_CALL_TIMEOUT_SECONDS <= 0:
