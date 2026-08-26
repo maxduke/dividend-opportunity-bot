@@ -40,7 +40,7 @@ python scripts/research_csi_dp2.py \
   --output-dir research/output/000922
 ```
 
-`--refresh` ignores existing cached payloads. `--direct-csi-check` explicitly enables a live AKShare/CSI overlap comparison; it is disabled by default and cannot be used with `--offline`. Timeline payloads are used first. A post detail request is made only for a potentially relevant post whose timeline text lacks a required date or yield.
+`--refresh` ignores existing cached payloads. `--direct-csi-check` explicitly enables a live AKShare/CSI overlap comparison; it is disabled by default and cannot be used with `--offline`. Timeline payloads are used first. A post detail request is made only for a potentially relevant post whose timeline text lacks a required date or yield. When Xueqiu explicitly reports `truncated=false`, the timeline text is treated as complete and no detail request is made; genuinely absent parse fields remain failures.
 
 Detail requests use `https://api.xueqiu.com/statuses/show.json`. HTTP 400, 404, and 410 leave a `post-ID.statuses-show.not-found` endpoint-specific negative-cache marker. Later online and offline runs reuse that marker without requesting the unavailable post again; `--refresh` retries it and removes the marker after a successful response. If a detail request exhausts its transient retries, a circuit breaker skips later detail requests for that run while still parsing the cached timeline conservatively. The report then fails `TECHNICAL_COMPLETENESS`; re-run later as a new cooldown window. If the run is interrupted with Ctrl-C, fetched cache files are retained and the same command can be rerun to continue.
 

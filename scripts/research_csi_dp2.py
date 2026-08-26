@@ -133,7 +133,8 @@ def run(args: argparse.Namespace) -> tuple[str, Path]:
             ):
                 continue
             candidate_posts += 1
-            if not detail_circuit_open and needs_detail_request(
+            timeline_text_complete = payload.get("truncated") is False
+            if not timeline_text_complete and not detail_circuit_open and needs_detail_request(
                 post,
                 benchmark_code=benchmark_code,
                 benchmark_name=BENCHMARKS[benchmark_code],

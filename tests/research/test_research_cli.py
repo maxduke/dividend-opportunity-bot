@@ -176,3 +176,43 @@ def test_detail_request_error_opens_circuit_and_report_still_generates(tmp_path,
     assert "HTTP 403" in caplog.text
     assert "remaining detail requests skipped" in caplog.text
     assert "xq_a_token" not in caplog.text
+
+
+def test_untruncated_timeline_post_never_requests_detail(tmp_path, monkeypatch):
+    status = {
+        "id": "complete",
+        "created_at": "2026-08-02T08:00:00+08:00",
+        "title": "#中证红利指数每日股息率速递#",
+        "text": "中证指数官网数据显示，截至2026年8月1日，中证红利待更新",
+        "truncated": False,
+    }
+
+    class CompleteTimelineClient:
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def fetch_timeline(self, **kwargs):
+            del kwargs
+            return TimelineResult(1, [status], "max_pages", 1)
+
+        def fetch_detail(self, post_id):
+            raise AssertionError(f"detail requested for complete timeline post {post_id}")
+
+    monkeypatch.setattr(research_csi_dp2, "XueqiuClient", CompleteTimelineClient)
+    decision, output_dir = research_csi_dp2.run(
+        research_csi_dp2.build_parser().parse_args(
+            ["--output-dir", str(tmp_path / "output"), "--max-pages", "1"]
+        )
+    )
+
+    assert decision == "NOT_ELIGIBLE_FOR_BACKFILL"
+    report = json.loads(output_dir.joinpath("validation-report.json").read_text())
+    assert report["parse"]["candidate_posts"] == 1
+    assert report["parse"]["failures"] == 1
+    assert "TECHNICAL_COMPLETENESS" not in report["eligibility"]["failed_gates"]
