@@ -287,7 +287,9 @@ class XueqiuClient:
                     continue
                 raise RequestError(f"request failed after 3 attempts (HTTP {status})")
             if status in permanent_not_found_statuses:
-                raise NotFoundError(f"requested Xueqiu post was not found (HTTP {status})")
+                raise NotFoundError(
+                    f"requested Xueqiu post detail is permanently unavailable (HTTP {status})"
+                )
             if not 200 <= status < 300:
                 raise RequestError(f"request failed with HTTP {status}")
 
@@ -443,7 +445,7 @@ class XueqiuClient:
             offline=use_offline,
             refresh=use_refresh,
             not_found_path=self._detail_not_found_path(normalized_id),
-            permanent_not_found_statuses=frozenset({400, 404, 410}),
+            permanent_not_found_statuses=frozenset({400, 404, 405, 410}),
         )
 
     def close(self) -> None:
