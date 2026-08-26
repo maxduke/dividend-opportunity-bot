@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from research.csi_dp2.xueqiu_client import RequestError, TimelineResult
 from scripts import research_csi_dp2
 
 
@@ -122,3 +123,53 @@ def test_direct_csi_check_uses_only_published_dp2_columns(monkeypatch):
     assert research_csi_dp2.fetch_direct_csi("000922") == [
         {"valuation_date": pd.Timestamp("2026-07-30").date(), "dividend_yield2": 4.36}
     ]
+
+
+def test_detail_request_error_opens_circuit_and_report_still_generates(tmp_path, monkeypatch, caplog):
+    statuses = [
+        {
+            "id": "first",
+            "created_at": "2026-08-01T08:00:00+08:00",
+            "title": "#中证红利指数每日股息率速递#",
+            "text": "中证红利",
+        },
+        {
+            "id": "second",
+            "created_at": "2026-08-02T08:00:00+08:00",
+            "title": "#中证红利指数每日股息率速递#",
+            "text": "中证红利",
+        },
+    ]
+    detail_calls = []
+
+    class FailingDetailClient:
+        def __init__(self, **kwargs):
+            del kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def fetch_timeline(self, **kwargs):
+            del kwargs
+            return TimelineResult(1, statuses, "max_pages", len(statuses))
+
+        def fetch_detail(self, post_id):
+            detail_calls.append(post_id)
+            raise RequestError("request failed after 3 attempts (HTTP 403)")
+
+    monkeypatch.setattr(research_csi_dp2, "XueqiuClient", FailingDetailClient)
+    decision, output_dir = research_csi_dp2.run(
+        research_csi_dp2.build_parser().parse_args(
+            ["--output-dir", str(tmp_path / "output"), "--max-pages", "1"]
+        )
+    )
+
+    assert decision == "NOT_ELIGIBLE_FOR_BACKFILL"
+    assert output_dir.joinpath("validation-report.json").exists()
+    assert detail_calls == ["first"]
+    assert "HTTP 403" in caplog.text
+    assert "remaining detail requests skipped" in caplog.text
+    assert "xq_a_token" not in caplog.text

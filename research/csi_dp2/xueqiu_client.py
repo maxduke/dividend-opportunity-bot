@@ -261,7 +261,13 @@ class XueqiuClient:
     def _is_retryable_status(status: int) -> bool:
         return status == 403 or status == 429 or 500 <= status <= 599
 
-    def _request_json(self, url: str, params: Mapping[str, Any]) -> Any:
+    def _request_json(
+        self,
+        url: str,
+        params: Mapping[str, Any],
+        *,
+        permanent_not_found_statuses: frozenset[int] = frozenset(),
+    ) -> Any:
         for attempt in range(REQUEST_ATTEMPTS):
             if attempt == 0:
                 self._wait_for_request()
@@ -280,8 +286,8 @@ class XueqiuClient:
                 if attempt < REQUEST_ATTEMPTS - 1:
                     continue
                 raise RequestError(f"request failed after 3 attempts (HTTP {status})")
-            if status == 404:
-                raise NotFoundError("requested Xueqiu post was not found")
+            if status in permanent_not_found_statuses:
+                raise NotFoundError(f"requested Xueqiu post was not found (HTTP {status})")
             if not 200 <= status < 300:
                 raise RequestError(f"request failed with HTTP {status}")
 
@@ -305,6 +311,7 @@ class XueqiuClient:
         offline: bool,
         refresh: bool,
         not_found_path: Path | None = None,
+        permanent_not_found_statuses: frozenset[int] = frozenset(),
     ) -> Any:
         if not refresh:
             try:
@@ -316,7 +323,11 @@ class XueqiuClient:
         if offline:
             return self._read_cache(path)
         try:
-            payload = self._request_json(url, params)
+            payload = self._request_json(
+                url,
+                params,
+                permanent_not_found_statuses=permanent_not_found_statuses,
+            )
         except NotFoundError:
             if not_found_path is not None:
                 self._write_not_found_marker(not_found_path)
@@ -432,6 +443,7 @@ class XueqiuClient:
             offline=use_offline,
             refresh=use_refresh,
             not_found_path=self._detail_not_found_path(normalized_id),
+            permanent_not_found_statuses=frozenset({400, 404, 410}),
         )
 
     def close(self) -> None:

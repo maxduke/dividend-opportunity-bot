@@ -22,7 +22,12 @@ from research.csi_dp2.parser import (
 )
 from research.csi_dp2.report import write_reports
 from research.csi_dp2.validation import validate_archive
-from research.csi_dp2.xueqiu_client import XueqiuClient, XueqiuClientError
+from research.csi_dp2.xueqiu_client import (
+    NotFoundError,
+    RequestError,
+    XueqiuClient,
+    XueqiuClientError,
+)
 
 DEFAULT_USER_ID = "8374048440"
 DEFAULT_COOKIE_FILE = "~/.config/dividend-opportunity-bot/xueqiu.cookie"
@@ -114,6 +119,7 @@ def run(args: argparse.Namespace) -> tuple[str, Path]:
             start_page=args.start_page,
             max_pages=args.max_pages,
         )
+        detail_circuit_open = False
         for payload in timeline.statuses:
             try:
                 post = timeline_item_to_raw_post(payload, user_id=str(args.user_id))
@@ -127,7 +133,7 @@ def run(args: argparse.Namespace) -> tuple[str, Path]:
             ):
                 continue
             candidate_posts += 1
-            if needs_detail_request(
+            if not detail_circuit_open and needs_detail_request(
                 post,
                 benchmark_code=benchmark_code,
                 benchmark_name=BENCHMARKS[benchmark_code],
@@ -138,8 +144,18 @@ def run(args: argparse.Namespace) -> tuple[str, Path]:
                         client.fetch_detail(post.post_id),
                         user_id=str(args.user_id),
                     )
+                except NotFoundError as exc:
+                    logger.warning("Post %s detail unavailable: %s", post.post_id, exc)
+                except RequestError as exc:
+                    detail_circuit_open = True
+                    logger.warning(
+                        "Post %s detail unavailable: %s; detail circuit breaker opened, "
+                        "remaining detail requests skipped",
+                        post.post_id,
+                        exc,
+                    )
                 except XueqiuClientError as exc:
-                    logger.warning("Post %s detail unavailable: %s", post.post_id, type(exc).__name__)
+                    logger.warning("Post %s detail unavailable: %s", post.post_id, exc)
             parsed = parse_post(
                 post,
                 benchmark_code=benchmark_code,

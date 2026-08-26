@@ -158,6 +158,29 @@ def test_not_found_detail_is_permanent_and_not_retried(tmp_path):
     assert sleeps == []
 
 
+@pytest.mark.parametrize("status", [400, 404, 410])
+def test_detail_permanent_statuses_are_negative_cached(tmp_path, status):
+    session = Session([Response(status)])
+    xueqiu, _ = client(tmp_path, session)
+
+    with pytest.raises(NotFoundError, match=f"HTTP {status}"):
+        xueqiu.fetch_detail("deleted-post")
+
+    assert len(session.calls) == 1
+    assert (tmp_path / "cache/post-deleted-post.statuses-show.not-found").exists()
+
+
+def test_timeline_http_400_remains_request_error(tmp_path):
+    session = Session([Response(400)])
+    xueqiu, _ = client(tmp_path, session)
+
+    with pytest.raises(RequestError, match="HTTP 400") as raised:
+        xueqiu.fetch_timeline(max_pages=1)
+
+    assert not isinstance(raised.value, NotFoundError)
+    assert len(session.calls) == 1
+
+
 def test_not_found_detail_is_negative_cached_across_clients_and_offline(tmp_path):
     session = Session([Response(404)])
     xueqiu, _ = client(tmp_path, session)
