@@ -54,6 +54,7 @@ from .proxy_health import (
     check_proxy_balance_async,
     next_balance_retry_at,
     notify_proxy_health,
+    proxy_health_category,
     proxy_patch_active,
 )
 from .valuation_fetcher import backfill_cn10y, get_cached_valuation
@@ -489,7 +490,7 @@ async def proxy_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
         "",
         f"已配置：{'是' if ENABLE_AKSHARE_PROXY_PATCH else '否'}",
         f"补丁已启用：{'是' if active else '否'}",
-        f"余额状态：{PROXY_STATE_LABELS.get(status.state, status.state)}",
+        f"余额状态：{PROXY_STATE_LABELS.get(proxy_health_category(status), status.state)}",
         f"余额：{balance}",
         f"上次检查：{checked_at}",
         f"低余额阈值：{threshold}",
