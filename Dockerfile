@@ -13,8 +13,8 @@ RUN apt-get update && \
 # 首先只复制 requirements.txt 以利用 Docker 缓存
 COPY requirements.txt .
 
-# 使用 pip wheel 构建依赖
-RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
+# 直接安装到可复制的前缀，避免运行时镜像保留 wheel 层和 .pyc
+RUN pip install --no-cache-dir --no-compile --prefix=/install -r requirements.txt
 
 # --- Stage 2: Final Image ---
 # 确保最终镜像和构建镜像使用相同的基础
@@ -26,10 +26,8 @@ RUN groupadd --gid 10001 appuser && \
 
 WORKDIR /app
 
-# 从构建阶段复制 wheels 并安装
-COPY --from=builder --chown=appuser:appuser /wheels /wheels
-RUN pip install --no-cache /wheels/* && \
-    rm -rf /wheels
+# 运行时镜像只保留已安装依赖
+COPY --from=builder --chown=appuser:appuser /install /usr/local
 
 # 创建数据目录并设置权限
 RUN mkdir -p /app/data && \
