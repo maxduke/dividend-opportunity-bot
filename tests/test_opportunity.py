@@ -339,6 +339,43 @@ def test_future_valuation_date_is_stale_and_cannot_raise_level(monkeypatch):
     assert "估值日期在未来，新鲜度无效" in snapshot.data_notes
 
 
+def test_unavailable_calendar_uses_valuation_safety_gate(monkeypatch):
+    history = pd.DataFrame(
+        {"收盘": [100.0] * 300},
+        index=pd.date_range("2025-01-01", periods=300),
+    )
+    history.attrs.update(price_basis="qfq", price_basis_asof="2026-08-24")
+    valuation = {
+        "valuation_date": "2026-08-23",
+        "dividend_yield1": 8.0,
+        "dividend_yield2": 8.0,
+        "pe1": 8.0,
+        "pe2": 8.0,
+    }
+    bond = {"yield_date": "2026-08-23", "cn10y": 1.5, "source": "chinabond"}
+    monkeypatch.setattr(
+        "src.opportunity._now",
+        lambda: datetime(2026, 8, 24, 10, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    monkeypatch.setattr("src.opportunity.trading_sessions_elapsed", lambda *args: None)
+    monkeypatch.setattr(
+        "src.opportunity.get_cached_valuation", AsyncMock(return_value=valuation)
+    )
+    monkeypatch.setattr("src.opportunity.get_cached_cn10y", AsyncMock(return_value=bond))
+    monkeypatch.setattr("src.opportunity.get_valuation_history", lambda *args: [])
+    monkeypatch.setattr(
+        "src.opportunity.get_bond_history", lambda *args, **kwargs: [bond]
+    )
+
+    snapshot = asyncio.run(
+        evaluate_opportunity(_rule(), SimpleNamespace(bot_data={}), spot_price=90, hist_df=history)
+    )
+
+    assert snapshot.level == "WATCH"
+    assert snapshot.data_quality == "STALE_VALUATION"
+    assert "交易日历新鲜度不可用，已启用估值安全门控" in snapshot.data_notes
+
+
 def test_unconfirmed_qfq_basis_marks_qfq_fallback_degraded(monkeypatch):
     history = pd.DataFrame(
         {"收盘": [100.0] * 300},

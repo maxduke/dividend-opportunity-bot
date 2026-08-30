@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from src.utils import normalize_hist_df, get_sina_symbol
+from src.utils import get_sina_symbol, normalize_hist_df, split_message
 
 
 class TestNormalizeHistDf:
@@ -109,3 +109,9 @@ class TestGetSinaSymbol:
     def test_unknown_prefix(self):
         """未知前缀返回原值。"""
         assert get_sina_symbol('700001') == '700001'
+
+
+def test_split_message_splits_a_single_oversized_line():
+    chunks = split_message("x" * 4000, max_len=3800)
+
+    assert [len(chunk) for chunk in chunks] == [3800, 200]

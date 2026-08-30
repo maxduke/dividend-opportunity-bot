@@ -125,6 +125,7 @@ def test_adjusted_etf_sina_fallback_is_marked_unadjusted(monkeypatch):
         return history.copy()
 
     monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    _enable_paid_proxy(monkeypatch, data_fetcher)
     monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
 
     result = asyncio.run(data_fetcher.get_history_data("510300", 550))

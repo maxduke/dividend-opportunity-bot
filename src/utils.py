@@ -38,6 +38,12 @@ def split_message(text: str, max_len: int = 3800) -> list[str]:
     chunks = []
     current = ""
     for line in text.splitlines():
+        if len(line) > max_len:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(line[start:start + max_len] for start in range(0, len(line), max_len))
+            continue
         candidate = f"{current}\n{line}" if current else line
         if current and len(candidate) > max_len:
             chunks.append(current)

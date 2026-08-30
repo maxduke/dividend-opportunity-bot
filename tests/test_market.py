@@ -5,6 +5,10 @@ from zoneinfo import ZoneInfo
 from src import market
 
 
+async def _run_inline(function, *args, **kwargs):
+    return function(*args, **kwargs)
+
+
 def test_local_xshg_calendar_distinguishes_holiday_and_trading_day():
     tz = ZoneInfo("Asia/Shanghai")
     assert not market.is_trading_day(datetime(2024, 10, 1, tzinfo=tz))
@@ -89,6 +93,8 @@ def test_async_calendar_preload_is_single_flight(monkeypatch):
     monkeypatch.setattr(market, "_trade_day_refresh_task", None)
     monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
 
+    monkeypatch.setattr(asyncio, "to_thread", _run_inline)
+
     async def check():
         await asyncio.gather(
             market.ensure_trade_days_loaded(check_date),
@@ -112,6 +118,8 @@ def test_async_calendar_preload_loads_out_of_range_weekend(monkeypatch):
     )
     monkeypatch.setattr(market, "_trade_day_refresh_task", None)
     monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
+
+    monkeypatch.setattr(asyncio, "to_thread", _run_inline)
 
     asyncio.run(market.ensure_trade_days_loaded(check_date))
 

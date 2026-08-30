@@ -333,12 +333,8 @@ async def evaluate_opportunity(
             logger.warning("交易日历新鲜度判断失败: %s", exc)
             sessions = None
         if sessions is None:
-            stale = (now.date() - valuation_date).days > 14
-            notes.append("交易日历新鲜度不可用，已回退到自然日判断")
-            if stale:
-                notes.append(
-                    f"估值日期 {valuation_date.isoformat()} 已超过 14 个自然日"
-                )
+            stale = True
+            notes.append("交易日历新鲜度不可用，已启用估值安全门控")
         else:
             stale = sessions > VALUATION_STALE_MAX_TRADING_DAYS
             if stale:

@@ -143,7 +143,7 @@ docker compose up -d --build
 
 ## Database backup
 
-`/app/data/rules.db` 保存逐渐累积的本地历史，包括 CSI 估值、中国十年期国债、Opportunity 快照和历史规则数据。升级或迁移权限前请先备份该文件；请使用文件系统 / NAS 快照，或定期复制它进行备份。机器人不会在应用内自动执行备份。
+`/app/data/rules.db` 保存逐渐累积的本地历史，包括 CSI 估值、中国十年期国债、Opportunity 快照和历史规则数据。升级或迁移权限前请先备份该文件。在运行中备份时请使用 SQLite `backup` API / `sqlite3 .backup`，或先停止 Bot 再复制数据库；不要在可能写入时直接复制 `rules.db`。机器人不会在应用内自动执行备份。
 
 ## 数据源与风险说明
 

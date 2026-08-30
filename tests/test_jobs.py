@@ -1,10 +1,11 @@
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pandas as pd
-from telegram.error import RetryAfter
+from telegram.error import Forbidden, RetryAfter
 
 
 def _raw_history():
@@ -80,6 +81,73 @@ def test_opportunity_loader_keeps_degraded_cache_in_cooldown(monkeypatch):
 
     assert history["510300"] is raw
     provider.assert_not_awaited()
+
+
+def test_intraday_job_only_loads_active_rules_for_whitelisted_users(monkeypatch):
+    from src import jobs
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.executescript(
+        """
+        CREATE TABLE whitelist (user_id INTEGER PRIMARY KEY);
+        CREATE TABLE opportunity_rules (
+            id INTEGER PRIMARY KEY, user_id INTEGER, asset_code TEXT, is_active INTEGER
+        );
+        INSERT INTO whitelist VALUES (1);
+        INSERT INTO opportunity_rules VALUES (1, 1, '510300', 1);
+        INSERT INTO opportunity_rules VALUES (2, 2, '159915', 1);
+        INSERT INTO opportunity_rules VALUES (3, 1, '512000', 0);
+        """
+    )
+    queries = []
+
+    def fake_db_execute(query, params=(), fetchone=False, fetchall=False, **kwargs):
+        queries.append(query)
+        cursor = connection.execute(query, params)
+        return cursor.fetchall() if fetchall else cursor.fetchone() if fetchone else None
+
+    evaluator = AsyncMock()
+    monkeypatch.setattr(jobs, "db_execute", fake_db_execute)
+    monkeypatch.setattr(jobs, "ENABLE_INTRADAY_MONITOR", True)
+    monkeypatch.setattr(jobs, "is_market_hours", lambda: True)
+    monkeypatch.setattr(jobs, "_load_opportunity_history", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        jobs,
+        "_fetch_all_realtime_quotes",
+        AsyncMock(return_value=({}, True)),
+    )
+    monkeypatch.setattr(jobs, "_evaluate_opportunity_rules", evaluator)
+
+    asyncio.run(jobs._check_opportunity_job(SimpleNamespace(bot_data={})))
+
+    assert len(queries) == 1
+    assert "join whitelist" in queries[0].lower()
+    rules = evaluator.await_args.args[1]
+    assert [rule["id"] for rule in rules] == [1]
+
+
+def test_opportunity_alert_deactivates_user_rules_when_forbidden(monkeypatch):
+    from src import jobs
+
+    send_message = AsyncMock(side_effect=Forbidden("blocked"))
+    db_execute = Mock()
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
+    monkeypatch.setattr(jobs, "db_execute", db_execute)
+    monkeypatch.setattr(jobs, "format_opportunity_alert", lambda *args, **kwargs: "alert")
+
+    result = asyncio.run(
+        jobs._send_opportunity_alert(
+            context, {"user_id": 9}, SimpleNamespace(), "new"
+        )
+    )
+
+    assert result is False
+    db_execute.assert_called_once()
+    query, params = db_execute.call_args.args[:2]
+    assert query.startswith("UPDATE opportunity_rules SET is_active = 0")
+    assert params[1] == 9
+    assert db_execute.call_args.kwargs == {"swallow_errors": False}
 
 
 def test_production_evaluator_does_not_pass_degraded_history(monkeypatch):
@@ -264,6 +332,7 @@ def test_command_menu_has_only_opportunity_product_surface(monkeypatch):
     bot = SimpleNamespace(set_my_commands=AsyncMock())
     application = SimpleNamespace(bot=bot, bot_data={})
     monkeypatch.setattr(main, "db_execute", lambda *args, **kwargs: [])
+    monkeypatch.setattr(main, "notify_proxy_health", AsyncMock(return_value=False))
 
     asyncio.run(main.post_init(application))
 

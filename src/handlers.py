@@ -375,14 +375,14 @@ async def delete_opportunity_rule_command(update: Update, context: ContextTypes.
 
 @whitelisted_only
 async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    command = update.message.text.split()[0].lower()
+    command = update.message.text.split()[0].lower().split("@", 1)[0]
     try:
         rule_id = int(context.args[0])
     except (ValueError, IndexError):
         await update.message.reply_text(f"正确格式：{command} <规则 ID>")
         return
     rule = db_execute(
-        "SELECT id FROM opportunity_rules WHERE id = ? AND user_id = ?",
+        "SELECT * FROM opportunity_rules WHERE id = ? AND user_id = ?",
         (rule_id, update.effective_user.id),
         fetchone=True,
     )
@@ -390,16 +390,27 @@ async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.
         await update.message.reply_text("未找到该红利机会监控规则，或规则不属于您。")
         return
     active = 1 if command == "/opon" else 0
+    if rule["is_active"] == active:
+        await update.message.reply_text(f"✅ 红利机会监控规则 ID：{rule_id} 已{'开启' if active else '关闭'}。")
+        return
     if active:
+        snapshot = await evaluate_opportunity(rule, context)
+        save_opportunity_snapshot(snapshot, critical=True)
         db_execute(
             """
             UPDATE opportunity_rules
-            SET is_active = 1, last_score = NULL, last_level = NULL,
+            SET is_active = 1, last_score = ?, last_level = ?,
                 last_alert_score = NULL, last_alert_level = NULL, last_alert_at = NULL,
                 updated_at = ?
             WHERE id = ? AND user_id = ?
             """,
-            (datetime.now(SHANGHAI_TZ).isoformat(), rule_id, update.effective_user.id),
+            (
+                snapshot.total_score,
+                snapshot.level,
+                datetime.now(SHANGHAI_TZ).isoformat(),
+                rule_id,
+                update.effective_user.id,
+            ),
             swallow_errors=False,
         )
     else:
