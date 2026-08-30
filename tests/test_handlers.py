@@ -148,3 +148,50 @@ def test_addop_initial_snapshot_is_critical(monkeypatch):
     save.assert_called_once_with(snapshot, critical=True)
     assert context.bot_data["quote_failure_counts"] == {}
     assert context.bot_data["quote_failure_notification_sent"] == {}
+
+
+def test_opon_group_suffix_is_idempotent(monkeypatch):
+    from src import handlers
+
+    reply = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=9),
+        message=SimpleNamespace(reply_text=reply, text="/opon@dividend_bot 7"),
+    )
+    context = SimpleNamespace(args=["7"], bot_data={})
+    db = Mock(return_value={"id": 7, "is_active": 1})
+    monkeypatch.setattr(handlers, "db_execute", db)
+
+    asyncio.run(handlers.toggle_opportunity_rule_command.__wrapped__(update, context))
+
+    db.assert_called_once()
+    assert "已开启" in reply.await_args.args[0]
+
+
+def test_opon_evaluates_and_stores_immediate_baseline(monkeypatch):
+    from src import handlers
+
+    reply = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=9),
+        message=SimpleNamespace(reply_text=reply, text="/opon 7"),
+    )
+    context = SimpleNamespace(args=["7"], bot_data={})
+    rule = {"id": 7, "is_active": 0}
+    snapshot = SimpleNamespace(total_score=73, level="STRONG")
+    db = Mock(return_value=rule)
+    evaluate = AsyncMock(return_value=snapshot)
+    save = Mock()
+    monkeypatch.setattr(handlers, "db_execute", db)
+    monkeypatch.setattr(handlers, "evaluate_opportunity", evaluate)
+    monkeypatch.setattr(handlers, "save_opportunity_snapshot", save)
+
+    asyncio.run(handlers.toggle_opportunity_rule_command.__wrapped__(update, context))
+
+    evaluate.assert_awaited_once_with(rule, context)
+    save.assert_called_once_with(snapshot, critical=True)
+    assert db.call_count == 2
+    assert "SET is_active = 1" in db.call_args_list[1].args[0]
+    assert "last_score = NULL" not in db.call_args_list[1].args[0]
+    assert db.call_args_list[1].args[1][:2] == (73, "STRONG")
+    assert "已开启" in reply.await_args.args[0]

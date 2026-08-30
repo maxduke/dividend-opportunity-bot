@@ -3,8 +3,10 @@
 import asyncio
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import partial
 from typing import Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
@@ -46,6 +48,9 @@ from .utils import get_sina_symbol, normalize_hist_df
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+# ponytail: bound abandoned provider threads; use subprocess isolation if calls
+# can hang permanently in production.
+_AKSHARE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="akshare")
 
 
 @dataclass(frozen=True)
@@ -284,8 +289,9 @@ async def _call_akshare(function, *args, timeout_seconds=None, **kwargs):
     """
     timeout = AKSHARE_CALL_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     try:
+        loop = asyncio.get_running_loop()
         return await asyncio.wait_for(
-            asyncio.to_thread(function, *args, **kwargs),
+            loop.run_in_executor(_AKSHARE_EXECUTOR, partial(function, *args, **kwargs)),
             timeout=timeout,
         )
     except asyncio.TimeoutError:
@@ -645,12 +651,6 @@ async def _fetch_single_realtime_quote(code: str) -> Optional[RealtimeQuote]:
         return None
 
     return await _run_with_retries(fetch_quote, f"获取实时价格({code})")
-
-
-async def _fetch_single_realtime_price(code: str) -> Union[float, None]:
-    """Compatibility wrapper; the provider is called exactly once per attempt."""
-    quote = await _fetch_single_realtime_quote(code)
-    return quote.price if quote is not None else None
 
 
 async def _fetch_all_realtime_quotes(

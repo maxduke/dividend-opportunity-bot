@@ -15,7 +15,11 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -r requirements.txt pytest
+      - run: pip install -r requirements.txt pytest==9.1.1
+      - name: Audit dependencies
+        run: |
+          python -m pip install pip-audit==2.10.1
+          pip-audit -r requirements.txt
       - run: pytest tests/ -q
       - name: Optional live AKShare smoke test
         env:
@@ -48,6 +52,8 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/${{ github.repository }}:latest
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

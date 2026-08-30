@@ -161,8 +161,12 @@ def test_ttl_and_force(monkeypatch):
 def test_async_balance_check_uses_same_cache(monkeypatch):
     from src import proxy_health
 
+    async def run_inline(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
     monkeypatch.setattr(proxy_health, "ENABLE_AKSHARE_PROXY_PATCH", True)
     monkeypatch.setattr(proxy_health.requests, "get", lambda *args, **kwargs: _response({"balance": 2}))
+    monkeypatch.setattr(asyncio, "to_thread", run_inline)
     status = asyncio.run(proxy_health.check_proxy_balance_async(force=True))
     assert status.state == proxy_health.POSITIVE
     assert proxy_health.get_cached_proxy_balance_status() == status

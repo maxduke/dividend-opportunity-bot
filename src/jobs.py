@@ -96,7 +96,13 @@ async def _check_opportunity_job(context: ContextTypes.DEFAULT_TYPE):
         return
 
     rules = db_execute(
-        "SELECT * FROM opportunity_rules WHERE is_active = 1", fetchall=True
+        """
+        SELECT opportunity_rules.*
+        FROM opportunity_rules
+        INNER JOIN whitelist ON whitelist.user_id = opportunity_rules.user_id
+        WHERE opportunity_rules.is_active = 1
+        """,
+        fetchall=True,
     ) or []
     if not rules:
         return
@@ -128,6 +134,17 @@ async def _send_opportunity_alert(context, rule, snapshot, reason) -> bool:
                 rule["user_id"],
             )
             await asyncio.sleep(wait_seconds)
+        except Forbidden:
+            db_execute(
+                "UPDATE opportunity_rules SET is_active = 0, updated_at = ? WHERE user_id = ?",
+                (datetime.now(SHANGHAI_TZ).isoformat(), rule["user_id"]),
+                swallow_errors=False,
+            )
+            logger.warning(
+                "无法向用户 %s 发送 Opportunity 告警，已停用该用户的监控规则。",
+                rule["user_id"],
+            )
+            return False
         except Exception as exc:
             logger.error("向用户 %s 发送 Opportunity 告警失败: %s", rule["user_id"], exc)
             return False

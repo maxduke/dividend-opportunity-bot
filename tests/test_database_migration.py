@@ -48,6 +48,11 @@ def test_legacy_database_migration_is_non_destructive(monkeypatch, tmp_path):
     database.db_init()
 
     assert database.db_execute("SELECT COUNT(*) AS n FROM rules", fetchone=True)["n"] == 1
+    legacy_columns = {
+        row["name"]
+        for row in database.db_execute("PRAGMA table_info(rules)", fetchall=True)
+    }
+    assert "last_notification_date" not in legacy_columns
     snapshot_columns = {
         row["name"]
         for row in database.db_execute(
@@ -83,6 +88,10 @@ def test_db_preflight_creates_missing_parent(monkeypatch, tmp_path):
 
     assert db_file.parent.is_dir()
     assert db_file.is_file()
+    assert database.db_execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rules'",
+        fetchone=True,
+    ) is None
     _close_database(database)
 
 
