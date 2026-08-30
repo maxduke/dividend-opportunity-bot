@@ -97,7 +97,7 @@ Opportunity 监控始终使用前复权（`qfq`）价格。原始价格仅可用
 
 ### 可选的东方财富代理
 
-项目默认锁定 AKShare `1.18.87`。如果部署环境频繁触发东方财富限流，可安装并显式开启 `akshare-proxy-patch`：
+项目默认锁定 AKShare `1.18.94`。如果部署环境频繁触发东方财富限流，可安装并显式开启 `akshare-proxy-patch`：
 
 - `ENABLE_AKSHARE_PROXY_PATCH=false`：默认关闭。
 - 开启时必须设置 `AKSHARE_PROXY_AUTH_TOKEN`；`AKSHARE_PROXY_AUTH_IP` 默认是服务商文档中的 `101.201.173.125`，这里只填写 IP，不要填写端口。token 只放在部署环境，不要提交到仓库。
@@ -147,7 +147,7 @@ docker compose up -d --build
 
 ## 数据源与风险说明
 
-- ETF / 股票价格：AKShare `1.18.87`；默认 EastMoney → 新浪 fallback。proxy 开启后，股票或不复权历史优先使用新浪；前复权 ETF 必须通过 EastMoney 获取，确保技术指标口径正确。历史请求按日缓存。
+- ETF / 股票价格：AKShare `1.18.94`；默认 EastMoney → 新浪 fallback。proxy 开启后，股票或不复权历史优先使用新浪；前复权 ETF 必须通过 EastMoney 获取，确保技术指标口径正确。历史请求按日缓存。
 - CSI Index Valuation：通过 AKShare 获取中证指数估值，保存 PE1 / PE2、股息率1 / 股息率2 的全部有效日期。
 - China 10Y：优先 ChinaBond（`bond_china_yield`），失败时使用 Sina fallback。
 
