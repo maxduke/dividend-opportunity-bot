@@ -104,6 +104,7 @@ def db_init():
             rule_id INTEGER NOT NULL,
             snapshot_at TEXT NOT NULL,
             price REAL,
+            spot_price REAL,
             rsi6 REAL,
             ma200 REAL,
             ma200_deviation REAL,
@@ -151,6 +152,7 @@ def _ensure_opportunity_snapshot_schema(cursor: sqlite3.Cursor):
     cursor.execute("PRAGMA table_info(opportunity_snapshots)")
     existing = {row[1] for row in cursor.fetchall()}
     for column, definition in (
+        ("spot_price", "REAL"),
         ("valuation_date", "TEXT"),
         ("cn10y_date", "TEXT"),
         ("cn10y_source", "TEXT"),
@@ -171,7 +173,7 @@ def _rollback(conn):
         logger.error("数据库回滚失败: %s", exc)
 
 
-def db_execute(query, params=(), fetchone=False, fetchall=False, swallow_errors=True):
+def db_execute(query, params=(), fetchone=False, fetchall=False, swallow_errors=True, return_lastrowid=False):
     with _lock:
         conn = None
         try:
@@ -183,6 +185,8 @@ def db_execute(query, params=(), fetchone=False, fetchall=False, swallow_errors=
                 return cursor.fetchone()
             if fetchall:
                 return cursor.fetchall()
+            if return_lastrowid:
+                return cursor.lastrowid
             return None
         except sqlite3.Error as e:
             _rollback(conn)
@@ -203,6 +207,26 @@ def db_executemany(query, params_list):
         except sqlite3.Error as e:
             _rollback(conn)
             logger.error(f"数据库批量操作失败: {e} | query={query}")
+            raise
+
+
+def delete_opportunity_rule(user_id: int, rule_id: int) -> None:
+    """Delete an owned rule and its snapshots atomically."""
+    with _lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute(
+                    """DELETE FROM opportunity_snapshots WHERE rule_id IN
+                    (SELECT id FROM opportunity_rules WHERE id = ? AND user_id = ?)""",
+                    (rule_id, user_id),
+                )
+                conn.execute(
+                    "DELETE FROM opportunity_rules WHERE id = ? AND user_id = ?",
+                    (rule_id, user_id),
+                )
+        except sqlite3.Error:
+            logger.exception("删除机会规则失败 rule_id=%s", rule_id)
             raise
 
 

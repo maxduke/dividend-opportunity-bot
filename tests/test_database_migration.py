@@ -59,7 +59,10 @@ def test_legacy_database_migration_is_non_destructive(monkeypatch, tmp_path):
             "PRAGMA table_info(opportunity_snapshots)", fetchall=True
         )
     }
-    assert {"technical_price_date", "technical_price_basis"} <= snapshot_columns
+    assert {"technical_price_date", "technical_price_basis", "spot_price"} <= snapshot_columns
+    assert database.db_execute(
+        "SELECT spot_price FROM opportunity_snapshots WHERE id = 7", fetchone=True
+    )["spot_price"] is None
     assert database.db_execute(
         "SELECT id FROM opportunity_snapshots WHERE id = 7", fetchone=True
     )["id"] == 7

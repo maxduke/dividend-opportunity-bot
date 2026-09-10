@@ -339,7 +339,7 @@ def test_command_menu_has_only_opportunity_product_surface(monkeypatch):
     commands = {item.command for item in bot.set_my_commands.await_args.args[0]}
     assert {
         "start", "help", "briefing", "addop", "delop", "oplist", "opon", "opoff",
-        "opcheck", "proxy_status",
+        "opcheck", "opthreshold", "proxy_status",
     } == commands
     assert application.bot_data[KEY_HIST_FAILURE_CACHE] == {}
     assert not {"add", "del", "list", "on", "off", "check"} & commands

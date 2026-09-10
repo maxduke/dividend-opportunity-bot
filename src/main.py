@@ -39,7 +39,8 @@ async def post_init(application: Application):
             BotCommand("oplist", "查看机会监控"),
             BotCommand("opon", "开启机会监控: ID"),
             BotCommand("opoff", "关闭机会监控: ID"),
-            BotCommand("opcheck", "查询机会分数"),
+            BotCommand("opcheck", "查询机会摘要"),
+            BotCommand("opthreshold", "修改告警阈值: ID 分数"),
             BotCommand("proxy_status", "查看 AKShare Proxy 状态"),
         ]
     )
@@ -97,14 +98,17 @@ def main():
         refresh_cache_command,
         start_command,
         toggle_opportunity_rule_command,
+        threshold_opportunity_command,
     )
     from .jobs import check_opportunity_job, daily_briefing_job
+    from .rule_ui import rule_callback
 
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_error_handler(error_handler)
     application.add_handlers(
         [
             CallbackQueryHandler(enable_briefing_callback, pattern=r"^briefing_on:\d+$"),
+            CallbackQueryHandler(rule_callback, pattern=r"^op:"),
             CommandHandler("start", start_command),
             CommandHandler("help", help_command),
             CommandHandler("briefing", briefing_command),
@@ -114,6 +118,7 @@ def main():
             CommandHandler("opon", toggle_opportunity_rule_command),
             CommandHandler("opoff", toggle_opportunity_rule_command),
             CommandHandler("opcheck", check_opportunity_command),
+            CommandHandler("opthreshold", threshold_opportunity_command),
             CommandHandler("add_w", add_whitelist_command),
             CommandHandler("del_w", del_whitelist_command),
             CommandHandler("list_w", list_whitelist_command),
