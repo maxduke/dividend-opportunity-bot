@@ -12,7 +12,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 
 from .config import DATA_QUALITY_LABELS, OPPORTUNITY_LEVEL_LABELS, SCORING_MODE_LABELS
-from .database import db_execute, delete_opportunity_rule, is_whitelisted
+from .database import db_execute, delete_opportunity_rule, is_whitelisted, rule_is_current
+from .user_tasks import task_manager
 from .opportunity import (
     OpportunitySnapshot, evaluate_opportunity, format_opportunity_chunks,
     record_rule_evaluation, save_opportunity_snapshot,
@@ -94,23 +95,41 @@ def summary(snapshot):
 
 
 async def run_query(message, context, user_id, rules):
-    status = await message.reply_text('正在计算红利机会评分，请稍候...')
+    await task_manager(context).submit(
+        user_id, message, '查询机会评分',
+        lambda work: _run_query(message, context, user_id, rules, work),
+    )
+
+
+async def _run_query(message, context, user_id, rules, work):
     succeeded = 0
-    for rule in rules:
+    failed = 0
+    skipped = 0
+    for index, rule in enumerate(rules):
+        await work.progress(f'已处理 {index}/{len(rules)} 条，正在查询规则 {rule["id"]}。')
         try:
+            if not rule_is_current(rule):
+                skipped += 1
+                continue
             snapshot = await evaluate_opportunity(rule, context)
+            work.check()
+            if not rule_is_current(rule):
+                skipped += 1
+                continue
             snapshot_id = save_opportunity_snapshot(snapshot, critical=True)
             record_rule_evaluation(rule['id'], snapshot)
             markup = InlineKeyboardMarkup([[button('完整明细', user_id, 'details', snapshot_id)]])
             await message.reply_html(summary(snapshot), reply_markup=markup)
             succeeded += 1
         except Exception:
+            work.check()
+            failed += 1
             logger.exception('手动查询规则 %s 失败', rule['id'])
             await message.reply_text(
                 f"规则 {rule['id']} 查询失败，请稍后重试。",
                 reply_markup=InlineKeyboardMarkup([[button('重试本条', user_id, 'check', rule['id'])]]),
             )
-    await status.edit_text(f'查询完成：成功 {succeeded} 条，失败 {len(rules) - succeeded} 条。')
+    return f'查询完成：成功 {succeeded} 条，失败 {failed} 条，因规则变更跳过 {skipped} 条。'
 
 
 def set_threshold(user_id, rule_id, value):
@@ -119,7 +138,7 @@ def set_threshold(user_id, rule_id, value):
         raise ValueError('threshold out of range')
     if owned_rule(user_id, rule_id) is None:
         return False
-    db_execute('UPDATE opportunity_rules SET min_score = ?, updated_at = ? WHERE id = ? AND user_id = ?',
+    db_execute('UPDATE opportunity_rules SET min_score = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND user_id = ?',
                (score, datetime.now(TZ).isoformat(), rule_id, user_id), swallow_errors=False)
     return True
 
@@ -184,7 +203,10 @@ async def rule_callback(update, context):
         if action == 'check':
             await run_query(query.message, context, user_id, [rule])
         elif action in {'on', 'off'}:
-            from .handlers import set_rule_active
+            from .handlers import set_rule_active, start_resume
+            if action == 'on' and not rule['is_active']:
+                await start_resume(query.message, context, user_id, rule)
+                return
             await set_rule_active(rule, user_id, context, action == 'on')
             page = db_execute('SELECT COUNT(*) AS n FROM opportunity_rules WHERE user_id = ? AND id < ?',
                               (user_id, value), fetchone=True, swallow_errors=False)['n']

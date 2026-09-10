@@ -69,6 +69,7 @@ def db_init():
             benchmark_name TEXT,
             min_score REAL NOT NULL DEFAULT 60,
             is_active INTEGER NOT NULL DEFAULT 1,
+            revision INTEGER NOT NULL DEFAULT 0,
             last_score REAL,
             last_level TEXT,
             last_alert_score REAL,
@@ -142,6 +143,9 @@ def db_init():
         ON opportunity_snapshots(rule_id, snapshot_at)
         ''')
         _ensure_opportunity_snapshot_schema(cursor)
+        cursor.execute("PRAGMA table_info(opportunity_rules)")
+        if "revision" not in {row[1] for row in cursor.fetchall()}:
+            cursor.execute("ALTER TABLE opportunity_rules ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
         if ADMIN_USER_ID:
             cursor.execute('INSERT OR IGNORE INTO whitelist (user_id) VALUES (?)', (ADMIN_USER_ID,))
         conn.commit()
@@ -228,6 +232,16 @@ def delete_opportunity_rule(user_id: int, rule_id: int) -> None:
         except sqlite3.Error:
             logger.exception("删除机会规则失败 rule_id=%s", rule_id)
             raise
+
+
+def rule_is_current(rule) -> bool:
+    """User edits invalidate in-flight work; routine score updates do not."""
+    current = db_execute(
+        """SELECT r.revision FROM opportunity_rules r
+        JOIN whitelist w ON w.user_id = r.user_id WHERE r.id = ? AND r.user_id = ?""",
+        (rule["id"], rule["user_id"]), fetchone=True, swallow_errors=False,
+    )
+    return current is not None and current["revision"] == rule["revision"]
 
 
 # --- 白名单操作 ---

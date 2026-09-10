@@ -129,6 +129,7 @@ def test_intraday_job_only_loads_active_rules_for_whitelisted_users(monkeypatch)
 
 def test_opportunity_alert_deactivates_user_rules_when_forbidden(monkeypatch):
     from src import jobs
+    monkeypatch.setattr(jobs, "rule_is_current", lambda rule: True)
 
     send_message = AsyncMock(side_effect=Forbidden("blocked"))
     db_execute = Mock()
@@ -152,6 +153,7 @@ def test_opportunity_alert_deactivates_user_rules_when_forbidden(monkeypatch):
 
 def test_production_evaluator_does_not_pass_degraded_history(monkeypatch):
     from src import jobs
+    monkeypatch.setattr(jobs, "rule_is_current", lambda rule: True)
 
     now = datetime.fromisoformat("2026-08-24T10:00:00+08:00")
     calls = []
@@ -183,6 +185,7 @@ def test_production_evaluator_does_not_pass_degraded_history(monkeypatch):
 
 def test_opportunity_alert_retries_after_timedelta_retry_after(monkeypatch):
     from src import jobs
+    monkeypatch.setattr(jobs, "rule_is_current", lambda rule: True)
 
     monkeypatch.setenv("PTB_TIMEDELTA", "true")
     send_message = AsyncMock(side_effect=[RetryAfter(timedelta(seconds=2)), None])
@@ -204,6 +207,7 @@ def test_opportunity_alert_retries_after_timedelta_retry_after(monkeypatch):
 
 def test_daily_briefing_keeps_degraded_banner_and_rule_details(monkeypatch):
     from src import jobs
+    monkeypatch.setattr(jobs, "rule_is_current", lambda rule: True)
     from src.opportunity import OpportunitySnapshot
 
     rule = {
@@ -257,6 +261,7 @@ def test_daily_briefing_keeps_degraded_banner_and_rule_details(monkeypatch):
 
 def test_daily_briefing_retries_each_chunk_only_once(monkeypatch):
     from src import jobs
+    monkeypatch.setattr(jobs, "rule_is_current", lambda rule: True)
     from src.opportunity import OpportunitySnapshot
 
     monkeypatch.setenv("PTB_TIMEDELTA", "true")
@@ -339,7 +344,7 @@ def test_command_menu_has_only_opportunity_product_surface(monkeypatch):
     commands = {item.command for item in bot.set_my_commands.await_args.args[0]}
     assert {
         "start", "help", "briefing", "addop", "delop", "oplist", "opon", "opoff",
-        "opcheck", "opthreshold", "proxy_status",
+        "opcheck", "opthreshold", "proxy_status", "task", "cancel",
     } == commands
     assert application.bot_data[KEY_HIST_FAILURE_CACHE] == {}
     assert not {"add", "del", "list", "on", "off", "check"} & commands
@@ -347,6 +352,7 @@ def test_command_menu_has_only_opportunity_product_surface(monkeypatch):
 
 def test_briefing_quote_outage_still_delivers_and_isolates_failed_rule(monkeypatch):
     from src import jobs
+    monkeypatch.setattr(jobs, "rule_is_current", lambda rule: True)
     from src.opportunity import OpportunitySnapshot
     rules = [dict(id=i, user_id=9, asset_code=str(510300+i), asset_name='ETF') for i in (1, 2)]
     context = SimpleNamespace(bot_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
@@ -375,6 +381,7 @@ def test_briefing_quote_outage_still_delivers_and_isolates_failed_rule(monkeypat
 
 def test_monitor_uses_persisted_daily_high_for_upgrade_deduplication(monkeypatch):
     from src import jobs
+    monkeypatch.setattr(jobs, "rule_is_current", lambda rule: True)
     from src.opportunity import OpportunitySnapshot
     conn = sqlite3.connect(':memory:')
     conn.row_factory = sqlite3.Row

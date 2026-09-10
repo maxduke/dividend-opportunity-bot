@@ -42,6 +42,7 @@ from .database import (
     db_execute,
     is_whitelisted,
     remove_from_whitelist,
+    rule_is_current,
 )
 from .opportunity import (
     evaluate_opportunity,
@@ -57,6 +58,7 @@ from .proxy_health import (
     proxy_patch_active,
 )
 from .valuation_fetcher import backfill_cn10y, get_cached_valuation
+from .user_tasks import AccessRevoked, task_manager
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
@@ -170,6 +172,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /opon <code>ID</code> / /opoff <code>ID</code> - 开关机会监控
 /opcheck [ID] - 查询摘要，按钮展开完整明细
 /opthreshold <code>ID 分数</code> - 修改告警阈值（0–100）
+/task - 查看当前或最近的后台任务
+/cancel - 取消自己的当前后台任务
 
 <b>白名单管理（仅限管理员）</b>
 /add_w <code>ID</code> - 添加用户
@@ -189,20 +193,39 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @whitelisted_only
 async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sent_message = None
+    args = tuple(context.args)
+    await task_manager(context).submit(
+        update.effective_user.id, update.message, "添加机会规则",
+        lambda work: _add_opportunity_rule(update, context, args, work),
+    )
+
+
+async def _add_opportunity_rule(update, context, args, work=None):
+    sent_message = work.message if work else None
     created_rule_id = None
     creation_complete = False
+
+    async def report(text, reply_markup=None):
+        if work:
+            work.detail = text
+            work.result_markup = reply_markup
+            await work._notify(reply_markup or work.keyboard())
+        elif sent_message is not None:
+            await sent_message.edit_text(text, reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(text, reply_markup=reply_markup)
+
     try:
-        if len(context.args) not in (2, 3):
-            await update.message.reply_text(
+        if len(args) not in (2, 3):
+            await report(
                 "命令格式错误。\n正确格式：/addop <资产代码> <估值基准代码> [最低评分]"
             )
             return
-        asset_code, benchmark_code = context.args[:2]
+        asset_code, benchmark_code = args[:2]
         benchmark_code = benchmark_code.upper()
-        min_score = float(context.args[2]) if len(context.args) == 3 else OPPORTUNITY_ALERT_THRESHOLD
+        min_score = float(args[2]) if len(args) == 3 else OPPORTUNITY_ALERT_THRESHOLD
         if not 0 <= min_score <= 100:
-            await update.message.reply_text("最低评分必须在 0 到 100 之间。")
+            await report("最低评分必须在 0 到 100 之间。")
             return
         if not (
             asset_code.isdigit()
@@ -210,10 +233,10 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
             and len(asset_code) == 6
             and len(benchmark_code) == 6
         ):
-            await update.message.reply_text("资产代码和估值基准代码必须是 6 位数字。")
+            await report("资产代码和估值基准代码必须是 6 位数字。")
             return
         if asset_code[0] not in STOCK_PREFIXES + ETF_PREFIXES:
-            await update.message.reply_text(
+            await report(
                 f"❌ 暂不支持资产代码 {asset_code}，仅支持股票和 ETF 历史数据源覆盖的代码。"
             )
             return
@@ -225,12 +248,15 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
             (update.effective_user.id, asset_code, benchmark_code),
             fetchone=True,
         ):
-            await update.message.reply_text("❌ 相同的资产—估值基准监控规则已存在。")
+            await report("❌ 相同的资产—估值基准监控规则已存在。")
             return
 
-        sent_message = await update.message.reply_text(
-            f"正在验证资产 {asset_code} 与估值基准 {benchmark_code}，请稍候..."
-        )
+        if sent_message is None:
+            sent_message = await update.message.reply_text(
+                f"正在验证资产 {asset_code} 与估值基准 {benchmark_code}，请稍候..."
+            )
+        if work:
+            await work.progress("正在验证资产报价与估值基准。")
         fetch_lock = context.bot_data.setdefault("quote_fetch_lock", asyncio.Lock())
         async with fetch_lock:
             quote = await _fetch_single_realtime_quote(asset_code)
@@ -243,31 +269,45 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
                 )
         price = quote.price if quote is not None else None
         if price is None:
-            await sent_message.edit_text(f"❌ 无法获取资产 {asset_code} 的实时价格，请确认代码正确。")
+            await report(f"❌ 无法获取资产 {asset_code} 的实时价格，请确认代码正确。")
             return
 
         valuation = await get_cached_valuation(benchmark_code, context.bot_data)
         if valuation is None:
-            await sent_message.edit_text(
+            await report(
                 "❌ 该估值基准当前无法通过中证估值接口获取股息率，\n"
                 "因此无法创建完整的红利估值监控规则。"
             )
             return
         selected_yield = "dividend_yield1" if CSI_DIVIDEND_YIELD_FIELD == "股息率1" else "dividend_yield2"
         if valuation[selected_yield] is None:
-            await sent_message.edit_text(
+            await report(
                 "❌ 该估值基准当前无法通过中证估值接口获取股息率，\n"
                 "因此无法创建完整的红利估值监控规则。"
             )
             return
 
-        await sent_message.edit_text("已验证估值基准，正在同步所需的中国十年期国债历史...")
-        await backfill_cn10y()
+        await report("已验证估值基准，正在同步所需的中国十年期国债历史...")
+        if work:
+            await work.progress("正在同步国债历史。")
+        backfill_lock = context.bot_data.setdefault("bond_backfill_lock", asyncio.Lock())
+        async with backfill_lock:
+            await backfill_cn10y()
         asset_name = await get_asset_name_with_cache(asset_code, context)
         benchmark_name = str(valuation["benchmark_name"] or benchmark_code)
+        if work:
+            await work.progress("正在计算初始评分，完成后才保存规则。")
+        draft = dict(id=0, user_id=update.effective_user.id, asset_code=asset_code,
+                     asset_name=asset_name, benchmark_code=benchmark_code,
+                     benchmark_name=benchmark_name, min_score=min_score)
+        snapshot = await evaluate_opportunity(draft, context, quote=quote, spot_price=price)
+        if work:
+            work.check()
+        elif not is_whitelisted(update.effective_user.id):
+            raise AccessRevoked
         now = datetime.now(SHANGHAI_TZ).isoformat()
         try:
-            db_execute(
+            created_rule_id = db_execute(
                 """
                 INSERT INTO opportunity_rules (
                     user_id, asset_code, asset_name, benchmark_code, benchmark_name,
@@ -285,26 +325,18 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
                     now,
                 ),
                 swallow_errors=False,
+                return_lastrowid=True,
             )
         except sqlite3.IntegrityError:
-            await sent_message.edit_text("❌ 相同的资产—估值基准监控规则已存在。")
+            await report("❌ 相同的资产—估值基准监控规则已存在。")
             return
 
-        rule = db_execute(
-            """
-            SELECT * FROM opportunity_rules
-            WHERE user_id = ? AND asset_code = ? AND benchmark_code = ?
-            """,
-            (update.effective_user.id, asset_code, benchmark_code),
-            fetchone=True,
-        )
-        created_rule_id = rule["id"]
-        snapshot = await evaluate_opportunity(rule, context, quote=quote, spot_price=price)
+        snapshot.rule_id = created_rule_id
         save_opportunity_snapshot(snapshot, critical=True)
-        record_rule_evaluation(rule["id"], snapshot)
+        record_rule_evaluation(created_rule_id, snapshot)
         creation_complete = True
         guidance, markup = _delivery_guidance(update.effective_user.id)
-        await sent_message.edit_text(
+        await report(
             "✅ 红利机会监控已创建\n\n"
             f"资产：{asset_name} ({asset_code})\n"
             f"估值基准：{benchmark_name} ({benchmark_code})\n\n"
@@ -314,8 +346,10 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
             "提示：机器人只验证两端数据可用，不会自动验证资产实际跟踪该估值基准，请自行核对。",
             reply_markup=markup,
         )
+    except AccessRevoked:
+        raise
     except ValueError:
-        await update.message.reply_text("最低评分必须是数字。")
+        await report("最低评分必须是数字。")
     except Exception as exc:
         logger.exception("添加 Opportunity Rule 失败: %s", exc)
         if created_rule_id is not None and not creation_complete:
@@ -325,10 +359,7 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
                 (created_rule_id,),
                 swallow_errors=False,
             )
-        if sent_message:
-            await sent_message.edit_text("添加红利机会监控规则时发生内部错误。")
-        else:
-            await update.message.reply_text("添加红利机会监控规则时发生内部错误。")
+        await report("添加红利机会监控规则时发生内部错误。")
 
 
 @whitelisted_only
@@ -425,20 +456,38 @@ async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.
         await update.message.reply_text("未找到该红利机会监控规则，或规则不属于您。")
         return
     active = 1 if command == "/opon" else 0
+    if active and not rule["is_active"]:
+        await start_resume(update.message, context, update.effective_user.id, rule)
+        return
     await set_rule_active(rule, update.effective_user.id, context, active)
     await update.message.reply_text(f"✅ 红利机会监控规则 ID：{rule_id} 已{'开启' if active else '关闭'}。")
 
 
-async def set_rule_active(rule, user_id, context, active):
-    if rule["is_active"] == active:
-        return
+async def start_resume(message, context, user_id, rule):
+    async def resume(work):
+        await work.progress(f"正在为规则 {rule['id']} 计算恢复基线。")
+        if not rule_is_current(rule):
+            return "规则已变更或删除，恢复操作已跳过。"
+        if await set_rule_active(rule, user_id, context, True, work):
+            return f"✅ 规则 {rule['id']} 已恢复监控。使用 /oplist 查看。"
+        return "规则已变更或删除，恢复操作已跳过。"
+    await task_manager(context).submit(user_id, message, "恢复机会监控", resume)
+
+
+async def set_rule_active(rule, user_id, context, active, work=None):
+    if rule["is_active"] == active and active:
+        return True
     if active:
         snapshot = await evaluate_opportunity(rule, context)
+        if work:
+            work.check()
+        if not rule_is_current(rule):
+            return False
         save_opportunity_snapshot(snapshot, critical=True)
         db_execute(
             """
             UPDATE opportunity_rules
-            SET is_active = 1, last_score = ?, last_level = ?,
+            SET is_active = 1, revision = revision + 1, last_score = ?, last_level = ?,
                 last_alert_score = NULL, last_alert_level = NULL, last_alert_at = NULL,
                 updated_at = ?
             WHERE id = ? AND user_id = ?
@@ -454,10 +503,12 @@ async def set_rule_active(rule, user_id, context, active):
         )
     else:
         db_execute(
-            "UPDATE opportunity_rules SET is_active = 0, updated_at = ? WHERE id = ? AND user_id = ?",
+            "UPDATE opportunity_rules SET is_active = 0, revision = revision + 1, updated_at = ? WHERE id = ? AND user_id = ?",
             (datetime.now(SHANGHAI_TZ).isoformat(), rule["id"], user_id),
             swallow_errors=False,
         )
+
+    return True
 
 
 @whitelisted_only
@@ -514,6 +565,7 @@ async def del_whitelist_command(update: Update, context: ContextTypes.DEFAULT_TY
             await update.message.reply_text("❌ 不能将管理员从白名单中删除。")
             return
         remove_from_whitelist(user_id)
+        task_manager(context).cancel(user_id)
         await update.message.reply_text(f"✅ 用户 {user_id} 已从白名单中移除。")
     except (ValueError, IndexError):
         await update.message.reply_text("命令格式错误。\n正确格式：/del_w <用户 ID>")
@@ -535,10 +587,18 @@ async def list_whitelist_command(update: Update, context: ContextTypes.DEFAULT_T
 
 @admin_only
 async def proxy_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args and context.args != ["refresh"]:
+    args = tuple(context.args)
+    await task_manager(context).submit(
+        update.effective_user.id, update.message, "查询代理状态",
+        lambda work: _proxy_status_command(update, context, args, work),
+    )
+
+
+async def _proxy_status_command(update, context, args, work=None):
+    if args and args != ("refresh",):
         await update.message.reply_text("正确格式：/proxy_status [refresh]")
         return
-    status = await check_proxy_balance_async(force=bool(context.args))
+    status = await check_proxy_balance_async(force=bool(args))
     await notify_proxy_health(context.bot)
     checked_at = status.checked_at.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M %z")
     checked_at = f"{checked_at[:-2]}:{checked_at[-2:]}"
@@ -579,6 +639,9 @@ async def proxy_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
                 "请重启 Bot 以安全启用。",
             ]
         )
+    if work:
+        work.check()
+        return "\n".join(lines)
     await update.message.reply_text("\n".join(lines))
 
 

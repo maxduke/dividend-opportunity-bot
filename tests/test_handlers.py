@@ -41,7 +41,7 @@ def test_addop_rejects_unsupported_asset_before_network(monkeypatch):
     context = SimpleNamespace(args=["900001", "000922", "60"], bot_data={})
     monkeypatch.setattr(handlers, "_fetch_single_realtime_quote", quote)
 
-    asyncio.run(handlers.add_opportunity_rule_command.__wrapped__(update, context))
+    asyncio.run(handlers._add_opportunity_rule(update, context, tuple(context.args)))
 
     assert "不支持资产代码 900001" in reply.await_args.args[0]
     quote.assert_not_awaited()
@@ -68,7 +68,7 @@ def test_proxy_status_refresh_requires_restart_without_hot_install(monkeypatch):
     monkeypatch.setattr(handlers, "proxy_health_category", lambda _: LOW_BALANCE)
     monkeypatch.setattr(handlers, "proxy_patch_active", lambda: False)
 
-    asyncio.run(handlers.proxy_status_command.__wrapped__(update, context))
+    asyncio.run(handlers._proxy_status_command(update, context, tuple(context.args)))
 
     handlers.check_proxy_balance_async.assert_awaited_once_with(force=True)
     text = reply.await_args.args[0]
@@ -115,14 +115,14 @@ def test_addop_initial_snapshot_is_critical(monkeypatch):
             "quote_failure_notification_sent": {"510300": True},
         },
     )
-    db_results = iter([None, {"id": 7}, {"daily_briefing_enabled": 0}])
+    db_results = iter([None, {"daily_briefing_enabled": 0}])
     snapshot = SimpleNamespace(total_score=72, level="STRONG")
     save = Mock()
 
     def fake_db_execute(query, *args, **kwargs):
         if query.lstrip().startswith("SELECT"):
             return next(db_results)
-        return None
+        return 7 if kwargs.get("return_lastrowid") else None
 
     monkeypatch.setattr(handlers, "db_execute", fake_db_execute)
     monkeypatch.setattr(
@@ -142,8 +142,9 @@ def test_addop_initial_snapshot_is_critical(monkeypatch):
     monkeypatch.setattr(handlers, "evaluate_opportunity", AsyncMock(return_value=snapshot))
     monkeypatch.setattr(handlers, "save_opportunity_snapshot", save)
     monkeypatch.setattr(handlers, "record_rule_evaluation", Mock())
+    monkeypatch.setattr(handlers, "is_whitelisted", lambda uid: True)
 
-    asyncio.run(handlers.add_opportunity_rule_command.__wrapped__(update, context))
+    asyncio.run(handlers._add_opportunity_rule(update, context, tuple(context.args)))
 
     save.assert_called_once_with(snapshot, critical=True)
     assert "监控已创建" in sent_message.edit_text.await_args.args[0]
@@ -188,15 +189,15 @@ def test_opon_evaluates_and_stores_immediate_baseline(monkeypatch):
     monkeypatch.setattr(handlers, "evaluate_opportunity", evaluate)
     monkeypatch.setattr(handlers, "save_opportunity_snapshot", save)
 
-    asyncio.run(handlers.toggle_opportunity_rule_command.__wrapped__(update, context))
+    monkeypatch.setattr(handlers, "rule_is_current", lambda rule: True)
+    asyncio.run(handlers.set_rule_active(rule, 9, context, True))
 
     evaluate.assert_awaited_once_with(rule, context)
     save.assert_called_once_with(snapshot, critical=True)
-    assert db.call_count == 2
-    assert "SET is_active = 1" in db.call_args_list[1].args[0]
-    assert "last_score = NULL" not in db.call_args_list[1].args[0]
-    assert db.call_args_list[1].args[1][:2] == (73, "STRONG")
-    assert "已开启" in reply.await_args.args[0]
+    assert db.call_count == 1
+    assert "SET is_active = 1" in db.call_args_list[0].args[0]
+    assert "last_score = NULL" not in db.call_args_list[0].args[0]
+    assert db.call_args_list[0].args[1][:2] == (73, "STRONG")
 
 
 @pytest.mark.parametrize('intraday,subscribed,times,manual,button', [

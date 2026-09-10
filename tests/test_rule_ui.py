@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src import database, handlers, rule_ui
+from src.user_tasks import task_manager
 from src.opportunity import OpportunitySnapshot, save_opportunity_snapshot
 
 
@@ -126,7 +127,11 @@ def test_details_expand_original_snapshot_without_fetching(rules_db, monkeypatch
     evaluate = AsyncMock(return_value=snapshot())
     monkeypatch.setattr(rule_ui, 'evaluate_opportunity', evaluate)
     msg = message()
-    asyncio.run(rule_ui.run_query(msg, SimpleNamespace(), 9, [rule_ui.owned_rule(9, 1)]))
+    async def query():
+        context = SimpleNamespace(bot_data={})
+        await rule_ui.run_query(msg, context, 9, [rule_ui.owned_rule(9, 1)])
+        await (task_manager(context).active.get(9) or task_manager(context).recent[9]).task
+    asyncio.run(query())
     data = msg.reply_html.await_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data
     save_opportunity_snapshot(snapshot(score=90), critical=True)
     update = callback(data)
@@ -143,8 +148,12 @@ def test_details_expand_original_snapshot_without_fetching(rules_db, monkeypatch
 def test_query_isolates_failures_and_returns_retry_button(rules_db, monkeypatch):
     monkeypatch.setattr(rule_ui, 'evaluate_opportunity', AsyncMock(side_effect=[RuntimeError('outage'), snapshot(2)]))
     msg = message()
-    asyncio.run(rule_ui.run_query(msg, SimpleNamespace(), 9,
-        [rule_ui.owned_rule(9, 1), rule_ui.owned_rule(9, 2)]))
+    async def query():
+        context = SimpleNamespace(bot_data={})
+        await rule_ui.run_query(msg, context, 9,
+            [rule_ui.owned_rule(9, 1), rule_ui.owned_rule(9, 2)])
+        await (task_manager(context).active.get(9) or task_manager(context).recent[9]).task
+    asyncio.run(query())
     assert '成功 1 条，失败 1 条' in msg.reply_text.return_value.edit_text.await_args.args[0]
     retry = msg.reply_text.await_args.kwargs['reply_markup'].inline_keyboard[0][0]
     assert retry.callback_data == 'op:9:check:1'
@@ -166,12 +175,15 @@ def test_paused_rule_is_queryable_by_id(rules_db, monkeypatch):
 def test_on_off_buttons_share_baseline_and_are_idempotent(rules_db, monkeypatch):
     evaluate = AsyncMock(return_value=snapshot())
     monkeypatch.setattr(handlers, 'evaluate_opportunity', evaluate)
-    context = SimpleNamespace()
+    context = SimpleNamespace(bot_data={})
     asyncio.run(rule_ui.rule_callback(callback('op:9:off:1'), context))
     assert rule_ui.owned_rule(9, 1)['is_active'] == 0
     evaluate.assert_not_awaited()
-    asyncio.run(rule_ui.rule_callback(callback('op:9:on:1'), context))
-    asyncio.run(rule_ui.rule_callback(callback('op:9:on:1'), context))
+    async def resume():
+        await rule_ui.rule_callback(callback('op:9:on:1'), context)
+        await (task_manager(context).active.get(9) or task_manager(context).recent[9]).task
+        await rule_ui.rule_callback(callback('op:9:on:1'), context)
+    asyncio.run(resume())
     rule = rule_ui.owned_rule(9, 1)
     assert rule['is_active'] == 1 and rule['last_score'] == 72
     evaluate.assert_awaited_once()
