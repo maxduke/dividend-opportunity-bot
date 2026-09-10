@@ -115,7 +115,7 @@ def test_addop_initial_snapshot_is_critical(monkeypatch):
             "quote_failure_notification_sent": {"510300": True},
         },
     )
-    db_results = iter([None, {"id": 7}])
+    db_results = iter([None, {"id": 7}, {"daily_briefing_enabled": 0}])
     snapshot = SimpleNamespace(total_score=72, level="STRONG")
     save = Mock()
 
@@ -146,6 +146,8 @@ def test_addop_initial_snapshot_is_critical(monkeypatch):
     asyncio.run(handlers.add_opportunity_rule_command.__wrapped__(update, context))
 
     save.assert_called_once_with(snapshot, critical=True)
+    assert "监控已创建" in sent_message.edit_text.await_args.args[0]
+    assert "盘中自动告警" in sent_message.edit_text.await_args.args[0]
     assert context.bot_data["quote_failure_counts"] == {}
     assert context.bot_data["quote_failure_notification_sent"] == {}
 
@@ -195,3 +197,45 @@ def test_opon_evaluates_and_stores_immediate_baseline(monkeypatch):
     assert "last_score = NULL" not in db.call_args_list[1].args[0]
     assert db.call_args_list[1].args[1][:2] == (73, "STRONG")
     assert "已开启" in reply.await_args.args[0]
+
+
+@pytest.mark.parametrize('intraday,subscribed,times,manual,button', [
+    (False, False, '14:50', True, True),
+    (True, False, '14:50', False, True),
+    (False, True, '14:50', False, False),
+    (False, True, '', True, False),
+    (False, False, 'invalid,25:00', True, False),
+])
+def test_delivery_guidance_reflects_actual_push_configuration(monkeypatch, intraday, subscribed, times, manual, button):
+    from src import handlers
+    monkeypatch.setattr(handlers, 'ENABLE_INTRADAY_MONITOR', intraday)
+    monkeypatch.setattr(handlers, 'BRIEFING_TIMES_STR', times)
+    monkeypatch.setattr(handlers, 'db_execute', Mock(return_value={'daily_briefing_enabled':subscribed}))
+    text, markup = handlers._delivery_guidance(9)
+    assert ('当前仅支持手动查询' in text) is manual
+    assert (markup is not None) is button
+    if button:
+        assert markup.inline_keyboard[0][0].callback_data == 'briefing_on:9'
+
+
+@pytest.mark.parametrize('owner,whitelisted,configured,allowed', [
+    (9, True, True, True), (8, True, True, False),
+    (9, False, True, False), (9, True, False, False),
+])
+def test_briefing_button_checks_owner_and_permissions(monkeypatch, owner, whitelisted, configured, allowed):
+    from src import handlers
+    query = SimpleNamespace(data=f'briefing_on:{owner}', answer=AsyncMock(),
+        edit_message_reply_markup=AsyncMock(), message=SimpleNamespace(reply_text=AsyncMock()))
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=9), callback_query=query)
+    monkeypatch.setattr(handlers, 'is_whitelisted', lambda uid: whitelisted)
+    monkeypatch.setattr(handlers, 'BRIEFING_TIMES_STR', '14:50' if configured else '')
+    db = Mock(return_value={'daily_briefing_enabled':1})
+    monkeypatch.setattr(handlers, 'db_execute', db)
+    asyncio.run(handlers.enable_briefing_callback(update, SimpleNamespace()))
+    writes = [call for call in db.call_args_list if call.args[0].startswith('UPDATE')]
+    assert len(writes) == int(allowed)
+    if allowed:
+        assert writes[0].args[1] == (9,)
+        assert '已开启' in query.message.reply_text.await_args.args[0]
+    else:
+        query.message.reply_text.assert_not_awaited()

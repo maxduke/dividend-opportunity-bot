@@ -48,6 +48,7 @@ from .utils import get_sina_symbol, normalize_hist_df
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+MAX_REALTIME_QUOTE_AGE = timedelta(minutes=5)
 # ponytail: bound abandoned provider threads; use subprocess isolation if calls
 # can hang permanently in production.
 _AKSHARE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="akshare")
@@ -196,12 +197,20 @@ def build_indicator_close_series(
     quote_obj = _quote_from_value(quote)
     trading_today = _is_trading_day(current)
     quote_time = _to_shanghai_datetime(quote_obj.timestamp) if quote_obj else None
+    # During lunch and after close, age the quote against the last session end.
+    reference = current
+    if time(11, 30) <= current.time() < time(13):
+        reference = current.replace(hour=11, minute=30, second=0, microsecond=0)
+    elif current.time() >= time(15):
+        reference = current.replace(hour=15, minute=0, second=0, microsecond=0)
     quote_is_today = bool(
         quote_time is not None
         and quote_time.date() == today
         and quote_time <= current
         and quote_time.time() >= time(9, 30)
         and trading_today
+        and (quote_time.time() <= time(11, 30) or time(13) <= quote_time.time() <= time(15))
+        and reference - quote_time <= MAX_REALTIME_QUOTE_AGE
     )
 
     basis = hist_df.attrs.get("price_basis")
@@ -259,6 +268,12 @@ def build_indicator_close_series(
         degraded = True
     elif quote_time.time() < time(9, 30):
         note = "实时行情时间早于开盘时间，使用最近确认的 qfq 收盘价"
+        degraded = True
+    else:
+        note = (
+            f"实时行情已过期或不在交易时段（报价时间 {quote_time:%Y-%m-%d %H:%M}），"
+            "使用最近确认的 qfq 收盘价"
+        )
         degraded = True
     return IndicatorPriceSeries(closes, latest_price, latest_date, False, degraded, note)
 

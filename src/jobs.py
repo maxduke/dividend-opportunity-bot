@@ -38,6 +38,7 @@ from .data_fetcher import (
 )
 from .database import db_execute
 from .market import ensure_trade_days_loaded, is_market_hours, is_trading_day
+from .metrics import level_rank
 from .opportunity import (
     evaluate_opportunity,
     format_opportunity_alert,
@@ -155,10 +156,11 @@ def _opportunity_alerts_today(rule_id: int, today: datetime) -> int:
     row = db_execute(
         """
         SELECT COUNT(*) AS count FROM opportunity_snapshots
-        WHERE rule_id = ? AND alert_sent = 1 AND snapshot_at >= ?
+        WHERE rule_id = ? AND alert_sent = 1 AND snapshot_at >= ? AND snapshot_at < ?
         """,
-        (rule_id, today.strftime("%Y-%m-%d")),
+        (rule_id, today.strftime("%Y-%m-%d"), (today + timedelta(days=1)).strftime("%Y-%m-%d")),
         fetchone=True,
+        swallow_errors=False,
     )
     return int(row["count"]) if row else 0
 
@@ -185,8 +187,22 @@ async def _evaluate_opportunity_rules(context, rules, quotes, history, now):
                 ),
             )
             alerts_today = _opportunity_alerts_today(rule["id"], now)
+            notified = []
+            if alerts_today:
+                notified = db_execute(
+                    """SELECT level FROM opportunity_snapshots
+                    WHERE rule_id = ? AND alert_sent = 1
+                        AND snapshot_at >= ? AND snapshot_at < ?""",
+                    (
+                        rule["id"], now.strftime("%Y-%m-%d"),
+                        (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+                    ),
+                    fetchall=True, swallow_errors=False,
+                )
+            highest_level = max((row["level"] for row in notified), key=level_rank, default=None)
             should_alert, reason = should_send_opportunity_alert(
-                rule, snapshot, now=now, alerts_today=alerts_today
+                rule, snapshot, now=now, alerts_today=alerts_today,
+                highest_alert_level_today=highest_level,
             )
             sent = await _send_opportunity_alert(context, rule, snapshot, reason) if should_alert else False
             if should_alert and not sent:
@@ -227,20 +243,18 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
     codes = sorted({rule["asset_code"] for rule in rules})
     quotes, success = await _fetch_all_realtime_quotes(context, codes)
     if not success:
-        logger.error("执行每日简报任务时获取数据失败，任务中止。")
-        return
+        logger.warning("每日简报实时行情不可用，将尝试历史收盘与估值数据。")
     history = await _load_opportunity_history(context, codes, now)
 
     snapshots = {}
     for rule in rules:
         quote = quotes.get(rule["asset_code"])
-        if quote is None:
-            continue
         try:
             snapshot = await evaluate_opportunity(
                 rule,
                 context,
                 quote=quote,
+                fetch_quote=False,
                 hist_df=(
                     cached
                     if runtime_history_is_usable(
@@ -275,8 +289,12 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
         for rule in user_rules:
             snapshot = snapshots.get(rule["id"])
             if snapshot is None:
-                message += f"❓ {html.escape(str(rule['asset_name']))} ({rule['asset_code']}) 查询失败\n\n"
+                message += f"❓ {html.escape(str(rule['asset_name']))} ({rule['asset_code']}) 查询失败，请稍后使用 /opcheck {rule['id']} 重试\n\n"
                 continue
+            if snapshot.technical_price_basis == "qfq_history_close":
+                message += "⚠️ 实时行情未用于评分，本条使用历史收盘价。\n"
+                if snapshot.data_notes:
+                    message += html.escape(snapshot.data_notes[0]) + "\n"
             dy = (
                 f"{snapshot.dividend_yield_used:.2f}%"
                 if snapshot.dividend_yield_used is not None else "暂无"

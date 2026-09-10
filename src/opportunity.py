@@ -227,6 +227,7 @@ async def evaluate_opportunity(
     spot_price: Optional[float] = None,
     hist_df=None,
     quote: Optional[RealtimeQuote] = None,
+    fetch_quote: bool = True,
 ) -> OpportunitySnapshot:
     """Evaluate one rule; network data is supplied by shared caches where possible."""
     now = _now()
@@ -252,7 +253,7 @@ async def evaluate_opportunity(
     if quote is None and isinstance(spot_price, RealtimeQuote):
         quote = spot_price
         spot_price = quote.price
-    if quote is None and spot_price is None:
+    if quote is None and spot_price is None and fetch_quote:
         quotes, _ = await _fetch_all_realtime_quotes(context, [asset_code])
         quote = quotes.get(asset_code)
     elif quote is None and spot_price is not None:
@@ -607,6 +608,7 @@ def should_send_opportunity_alert(
     snapshot: OpportunitySnapshot,
     now: Optional[datetime] = None,
     alerts_today: int = 0,
+    highest_alert_level_today: Optional[str] = None,
 ) -> tuple[bool, str]:
     now = now or _now()
     if snapshot.technical_price_basis == "unavailable":
@@ -621,10 +623,23 @@ def should_send_opportunity_alert(
     if not crossed_threshold and not upgraded:
         return False, "no-crossing"
 
-    override = upgraded
+    last_alert_at = _parse_datetime(rule["last_alert_at"])
+    notified_level = highest_alert_level_today
+    if last_alert_at is not None and last_alert_at.date() == now.date():
+        last_level = _row_value(rule, "last_alert_level")
+        if last_level and (not notified_level or is_level_upgrade(notified_level, last_level)):
+            notified_level = last_level
+    # Returning to an already notified level is not a new escalation.
+    if upgraded and notified_level and not is_level_upgrade(notified_level, snapshot.level):
+        return False, "already-alerted-level"
+    override = upgraded and (not notified_level or is_level_upgrade(notified_level, snapshot.level))
+    # Midnight must not let a repeated level bypass an ongoing cooldown.
+    if last_alert_at is not None and (now - last_alert_at).total_seconds() < OPPORTUNITY_ALERT_COOLDOWN_MINUTES * 60:
+        last_level = _row_value(rule, "last_alert_level")
+        if last_level and not is_level_upgrade(last_level, snapshot.level):
+            override = False
     if not override and alerts_today >= OPPORTUNITY_MAX_ALERTS_PER_DAY:
         return False, "daily-limit"
-    last_alert_at = _parse_datetime(rule["last_alert_at"])
     if not override and last_alert_at is not None:
         elapsed = (now - last_alert_at).total_seconds() / 60
         if elapsed < OPPORTUNITY_ALERT_COOLDOWN_MINUTES:

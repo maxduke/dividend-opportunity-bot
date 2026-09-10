@@ -207,3 +207,30 @@ def test_unadjusted_fallback_disables_all_technical_scores(monkeypatch):
     )
     assert snapshot.ma200 is None and snapshot.high_52w is None and snapshot.rsi6 is None
     assert snapshot.long_term_score == snapshot.tactical_score == 0
+
+
+@pytest.mark.parametrize('quote_time,now_time,accepted', [
+    ('09:31', '14:50', False),
+    ('14:45', '14:50', True),
+    ('14:44', '14:50', False),
+    ('11:30', '12:30', True),
+    ('11:00', '12:30', False),
+    ('12:20', '12:30', False),
+    ('11:30', '13:01', False),
+    ('13:00', '13:01', True),
+    ('15:00', '20:00', True),
+    ('14:30', '20:00', False),
+    ('15:10', '20:00', False),
+])
+def test_quote_freshness_respects_sessions(monkeypatch, quote_time, now_time, accepted):
+    _trading_day(monkeypatch)
+    result = data_fetcher.build_indicator_close_series(
+        _history(['2026-08-21'], [100]),
+        data_fetcher.RealtimeQuote(80, datetime.fromisoformat(f'2026-08-24T{quote_time}:00+08:00')),
+        datetime.fromisoformat(f'2026-08-24T{now_time}:00+08:00'),
+    )
+    assert result.spot_used is accepted
+    assert result.current_price == (80 if accepted else 100)
+    if not accepted:
+        assert result.degraded
+        assert quote_time in result.note
