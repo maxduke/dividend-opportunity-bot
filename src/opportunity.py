@@ -516,9 +516,9 @@ def save_opportunity_snapshot(
     snapshot: OpportunitySnapshot,
     alert_sent: bool = False,
     critical: bool = False,
-) -> None:
-    """Save a snapshot; alert/explicit critical writes propagate DB errors."""
-    db_execute(
+) -> Optional[int]:
+    """Save a snapshot and return its ID; critical writes propagate DB errors."""
+    return db_execute(
         """
         INSERT INTO opportunity_snapshots (
             rule_id, snapshot_at, price, rsi6, ma200, ma200_deviation,
@@ -528,8 +528,8 @@ def save_opportunity_snapshot(
             spread_score, valuation_score, long_term_score, tactical_score,
             total_score, level, scoring_mode, data_quality, data_notes,
             valuation_date, cn10y_date, cn10y_source,
-            technical_price_date, technical_price_basis, alert_sent
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            technical_price_date, technical_price_basis, alert_sent, spot_price
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot.rule_id,
@@ -565,8 +565,10 @@ def save_opportunity_snapshot(
             snapshot.technical_price_date,
             snapshot.technical_price_basis,
             int(alert_sent),
+            snapshot.spot_price,
         ),
         swallow_errors=not (critical or alert_sent),
+        return_lastrowid=True,
     )
 
 

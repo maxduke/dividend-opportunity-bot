@@ -3,7 +3,6 @@
 """Telegram handlers for the dividend Opportunity product."""
 
 import asyncio
-import html
 import logging
 import sqlite3
 from datetime import datetime
@@ -11,7 +10,6 @@ from functools import wraps
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from .config import (
@@ -34,12 +32,10 @@ from .config import (
     REQUEST_INTERVAL_SECONDS,
     RSI_PERIOD,
     STOCK_PREFIXES,
-    TECHNICAL_HISTORY_DAYS,
 )
 from .data_fetcher import (
     _fetch_single_realtime_quote,
     get_asset_name_with_cache,
-    runtime_history_is_usable,
 )
 from .database import (
     add_to_whitelist,
@@ -49,7 +45,6 @@ from .database import (
 )
 from .opportunity import (
     evaluate_opportunity,
-    format_opportunity_chunks,
     record_rule_evaluation,
     save_opportunity_snapshot,
 )
@@ -173,7 +168,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /delop <code>ID</code> - 删除机会监控
 /oplist - 查看机会监控
 /opon <code>ID</code> / /opoff <code>ID</code> - 开关机会监控
-/opcheck [ID] - 查询机会分数明细
+/opcheck [ID] - 查询摘要，按钮展开完整明细
+/opthreshold <code>ID 分数</code> - 修改告警阈值（0–100）
 
 <b>白名单管理（仅限管理员）</b>
 /add_w <code>ID</code> - 添加用户
@@ -337,98 +333,79 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
 
 @whitelisted_only
 async def list_opportunity_rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rules = db_execute(
-        "SELECT * FROM opportunity_rules WHERE user_id = ? ORDER BY id",
-        (update.effective_user.id,),
-        fetchall=True,
-    )
-    if not rules:
-        await update.message.reply_text("您还没有设置红利机会监控规则。使用 /addop 添加。")
-        return
-    lines = ["<b>红利机会监控列表：</b>", ""]
-    for rule in rules:
-        icon = "🟢" if rule["is_active"] else "🔴"
-        score = "暂无" if rule["last_score"] is None else f"{rule['last_score']:.0f}"
-        asset_name = html.escape(str(rule["asset_name"] or rule["asset_code"]))
-        benchmark_name = html.escape(str(rule["benchmark_name"] or rule["benchmark_code"]))
-        lines.append(
-            f"{icon} <b>ID: {rule['id']}</b>\n"
-            f"  - {asset_name} (<code>{rule['asset_code']}</code>)\n"
-            f"  - 估值基准：{benchmark_name} (<code>{rule['benchmark_code']}</code>)\n"
-            f"  - 评分：{score} | 等级：{OPPORTUNITY_LEVEL_LABELS.get(rule['last_level'], '暂无')}\n"
-            f"  - 告警阈值: {rule['min_score']:.0f}\n"
-        )
-    await update.message.reply_html("\n".join(lines))
+    from .rule_ui import rule_page
+
+    text, markup = rule_page(update.effective_user.id)
+    await update.message.reply_html(text, reply_markup=markup)
 
 
 @whitelisted_only
 async def check_opportunity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from .rule_ui import owned_rule, run_query
+
     user_id = update.effective_user.id
     if context.args:
         try:
+            if len(context.args) != 1:
+                raise ValueError
             rule_id = int(context.args[0])
+            if not 0 < rule_id <= 2**63 - 1:
+                raise ValueError
         except ValueError:
             await update.message.reply_text("正确格式：/opcheck [规则 ID]")
             return
-        rules = db_execute(
-            "SELECT * FROM opportunity_rules WHERE id = ? AND user_id = ? AND is_active = 1",
-            (rule_id, user_id),
-            fetchall=True,
-        )
+        rule = owned_rule(user_id, rule_id)
+        rules = [rule] if rule is not None else []
     else:
         rules = db_execute(
             "SELECT * FROM opportunity_rules WHERE user_id = ? AND is_active = 1 ORDER BY id",
-            (user_id,),
-            fetchall=True,
+            (user_id,), fetchall=True, swallow_errors=False,
         )
     if not rules:
-        await update.message.reply_text("没有找到已激活的红利机会监控规则。")
+        await update.message.reply_text("没有找到可查询的规则。暂停规则可使用 /opcheck ID 单独查询。")
         return
-    status = await update.message.reply_text("正在计算红利机会评分，请稍候...")
-    cache = context.bot_data.get(KEY_HIST_CACHE, {})
-    first = True
-    for rule in rules:
-        cached = cache.get(rule["asset_code"])
-        snapshot = await evaluate_opportunity(
-            rule,
-            context,
-            hist_df=(
-                cached
-                if runtime_history_is_usable(cached, TECHNICAL_HISTORY_DAYS)
-                else None
-            ),
-        )
-        save_opportunity_snapshot(snapshot)
-        record_rule_evaluation(rule["id"], snapshot)
-        for chunk in format_opportunity_chunks(snapshot):
-            if first:
-                await status.edit_text(chunk, parse_mode=ParseMode.HTML)
-                first = False
-            else:
-                await update.message.reply_html(chunk)
+    await run_query(update.message, context, user_id, rules)
+
+
+@whitelisted_only
+async def threshold_opportunity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from .rule_ui import set_threshold
+
+    try:
+        if len(context.args) != 2:
+            raise ValueError
+        rule_id = int(context.args[0])
+        if not 0 < rule_id <= 2**63 - 1:
+            raise ValueError
+        updated = set_threshold(update.effective_user.id, rule_id, context.args[1])
+    except ValueError:
+        await update.message.reply_text("正确格式：/opthreshold <规则 ID> <0–100 的分数>")
+        return
+    await update.message.reply_text(
+        f"✅ 规则 {rule_id} 告警阈值已更新为 {float(context.args[1]):g}。监控状态和历史记录已保留。"
+        if updated else "未找到该规则，或规则不属于您。"
+    )
 
 
 @whitelisted_only
 async def delete_opportunity_rule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from .rule_ui import delete_confirmation, owned_rule
+
     try:
+        if len(context.args) != 1:
+            raise ValueError
         rule_id = int(context.args[0])
-        rule = db_execute(
-            "SELECT id FROM opportunity_rules WHERE id = ? AND user_id = ?",
-            (rule_id, update.effective_user.id),
-            fetchone=True,
-        )
-        if not rule:
-            await update.message.reply_text("未找到该红利机会监控规则，或规则不属于您。")
-            return
-        db_execute(
-            "DELETE FROM opportunity_snapshots WHERE rule_id = ?",
-            (rule_id,),
-            swallow_errors=False,
-        )
-        db_execute("DELETE FROM opportunity_rules WHERE id = ?", (rule_id,), swallow_errors=False)
-        await update.message.reply_text(f"✅ 红利机会监控规则 ID：{rule_id} 已删除。")
+        if not 0 < rule_id <= 2**63 - 1:
+            raise ValueError
     except (ValueError, IndexError):
         await update.message.reply_text("正确格式：/delop <规则 ID>")
+        return
+    rule = owned_rule(update.effective_user.id, rule_id)
+    if rule is None:
+        await update.message.reply_text("未找到该规则，或规则不属于您。")
+        return
+    text, markup = delete_confirmation(update.effective_user.id, rule)
+    await update.message.reply_text(text, reply_markup=markup)
 
 
 @whitelisted_only
@@ -448,8 +425,12 @@ async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.
         await update.message.reply_text("未找到该红利机会监控规则，或规则不属于您。")
         return
     active = 1 if command == "/opon" else 0
+    await set_rule_active(rule, update.effective_user.id, context, active)
+    await update.message.reply_text(f"✅ 红利机会监控规则 ID：{rule_id} 已{'开启' if active else '关闭'}。")
+
+
+async def set_rule_active(rule, user_id, context, active):
     if rule["is_active"] == active:
-        await update.message.reply_text(f"✅ 红利机会监控规则 ID：{rule_id} 已{'开启' if active else '关闭'}。")
         return
     if active:
         snapshot = await evaluate_opportunity(rule, context)
@@ -466,18 +447,17 @@ async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.
                 snapshot.total_score,
                 snapshot.level,
                 datetime.now(SHANGHAI_TZ).isoformat(),
-                rule_id,
-                update.effective_user.id,
+                rule["id"],
+                user_id,
             ),
             swallow_errors=False,
         )
     else:
         db_execute(
             "UPDATE opportunity_rules SET is_active = 0, updated_at = ? WHERE id = ? AND user_id = ?",
-            (datetime.now(SHANGHAI_TZ).isoformat(), rule_id, update.effective_user.id),
+            (datetime.now(SHANGHAI_TZ).isoformat(), rule["id"], user_id),
             swallow_errors=False,
         )
-    await update.message.reply_text(f"✅ 红利机会监控规则 ID：{rule_id} 已{'开启' if active else '关闭'}。")
 
 
 @whitelisted_only
