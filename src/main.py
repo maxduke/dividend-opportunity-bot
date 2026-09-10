@@ -24,6 +24,7 @@ from .config import (
 from .database import db_execute, db_init
 from .provider_bootstrap import install_data_provider_patch
 from .proxy_health import notify_proxy_health
+from .user_tasks import cancel_callback, cancel_command, stop_user_tasks, task_command
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ async def post_init(application: Application):
             BotCommand("opoff", "关闭机会监控: ID"),
             BotCommand("opcheck", "查询机会摘要"),
             BotCommand("opthreshold", "修改告警阈值: ID 分数"),
+            BotCommand("task", "查看后台任务进度"),
+            BotCommand("cancel", "取消当前后台任务"),
             BotCommand("proxy_status", "查看 AKShare Proxy 状态"),
         ]
     )
@@ -103,12 +106,18 @@ def main():
     from .jobs import check_opportunity_job, daily_briefing_job
     from .rule_ui import rule_callback
 
-    application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    application = (
+        Application.builder().token(TELEGRAM_TOKEN)
+        .post_init(post_init).post_stop(stop_user_tasks).build()
+    )
     application.add_error_handler(error_handler)
     application.add_handlers(
         [
             CallbackQueryHandler(enable_briefing_callback, pattern=r"^briefing_on:\d+$"),
             CallbackQueryHandler(rule_callback, pattern=r"^op:"),
+            CallbackQueryHandler(cancel_callback, pattern=r"^task:"),
+            CommandHandler("task", task_command),
+            CommandHandler("cancel", cancel_command),
             CommandHandler("start", start_command),
             CommandHandler("help", help_command),
             CommandHandler("briefing", briefing_command),

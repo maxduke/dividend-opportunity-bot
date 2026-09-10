@@ -36,7 +36,7 @@ from .data_fetcher import (
     history_failure_is_fresh,
     runtime_history_is_usable,
 )
-from .database import db_execute
+from .database import db_execute, rule_is_current
 from .market import ensure_trade_days_loaded, is_market_hours, is_trading_day
 from .metrics import level_rank
 from .opportunity import (
@@ -121,6 +121,8 @@ async def _send_opportunity_alert(context, rule, snapshot, reason) -> bool:
     message = format_opportunity_alert(snapshot, reason=reason)
     for attempt in range(2):
         try:
+            if not rule_is_current(rule):
+                return False
             await context.bot.send_message(
                 chat_id=rule["user_id"], text=message, parse_mode=ParseMode.HTML
             )
@@ -137,7 +139,7 @@ async def _send_opportunity_alert(context, rule, snapshot, reason) -> bool:
             await asyncio.sleep(wait_seconds)
         except Forbidden:
             db_execute(
-                "UPDATE opportunity_rules SET is_active = 0, updated_at = ? WHERE user_id = ?",
+                "UPDATE opportunity_rules SET is_active = 0, revision = revision + 1, updated_at = ? WHERE user_id = ?",
                 (datetime.now(SHANGHAI_TZ).isoformat(), rule["user_id"]),
                 swallow_errors=False,
             )
@@ -168,6 +170,8 @@ def _opportunity_alerts_today(rule_id: int, today: datetime) -> int:
 async def _evaluate_opportunity_rules(context, rules, quotes, history, now):
     for rule in rules:
         try:
+            if not rule_is_current(rule):
+                continue
             quote = quotes.get(rule["asset_code"])
             if quote is None:
                 logger.warning("实时价格缺失，跳过 Opportunity Rule: %s", rule["id"])
@@ -186,6 +190,8 @@ async def _evaluate_opportunity_rules(context, rules, quotes, history, now):
                     else None
                 ),
             )
+            if not rule_is_current(rule):
+                continue
             alerts_today = _opportunity_alerts_today(rule["id"], now)
             notified = []
             if alerts_today:
@@ -207,6 +213,8 @@ async def _evaluate_opportunity_rules(context, rules, quotes, history, now):
             sent = await _send_opportunity_alert(context, rule, snapshot, reason) if should_alert else False
             if should_alert and not sent:
                 # Preserve the old baseline so a transient Telegram failure can retry.
+                continue
+            if not rule_is_current(rule):
                 continue
             if snapshot_should_persist(rule["id"], snapshot, alert_sent=sent):
                 save_opportunity_snapshot(snapshot, alert_sent=sent)
@@ -250,6 +258,8 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
     for rule in rules:
         quote = quotes.get(rule["asset_code"])
         try:
+            if not rule_is_current(rule):
+                continue
             snapshot = await evaluate_opportunity(
                 rule,
                 context,
@@ -265,6 +275,8 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
                     else None
                 ),
             )
+            if not rule_is_current(rule):
+                continue
             save_opportunity_snapshot(snapshot)
             record_rule_evaluation(rule["id"], snapshot, now)
             snapshots[rule["id"]] = snapshot
@@ -273,7 +285,8 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
 
     rules_by_user = defaultdict(list)
     for rule in rules:
-        rules_by_user[rule["user_id"]].append(rule)
+        if rule_is_current(rule):
+            rules_by_user[rule["user_id"]].append(rule)
     today = now.strftime("%Y年%m月%d日")
     for user_id, user_rules in rules_by_user.items():
         message = f"📰 <b>收盘前红利机会简报（{today}）</b>\n\n"
