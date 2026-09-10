@@ -5,7 +5,7 @@ from datetime import time
 from zoneinfo import ZoneInfo
 
 from telegram import BotCommand
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 from .config import (
     BRIEFING_TIMES_STR,
@@ -86,6 +86,7 @@ def main():
         add_opportunity_rule_command,
         add_whitelist_command,
         briefing_command,
+        enable_briefing_callback,
         check_opportunity_command,
         del_whitelist_command,
         delete_opportunity_rule_command,
@@ -103,6 +104,7 @@ def main():
     application.add_error_handler(error_handler)
     application.add_handlers(
         [
+            CallbackQueryHandler(enable_briefing_callback, pattern=r"^briefing_on:\d+$"),
             CommandHandler("start", start_command),
             CommandHandler("help", help_command),
             CommandHandler("briefing", briefing_command),

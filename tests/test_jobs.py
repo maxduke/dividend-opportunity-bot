@@ -343,3 +343,71 @@ def test_command_menu_has_only_opportunity_product_surface(monkeypatch):
     } == commands
     assert application.bot_data[KEY_HIST_FAILURE_CACHE] == {}
     assert not {"add", "del", "list", "on", "off", "check"} & commands
+
+
+def test_briefing_quote_outage_still_delivers_and_isolates_failed_rule(monkeypatch):
+    from src import jobs
+    from src.opportunity import OpportunitySnapshot
+    rules = [dict(id=i, user_id=9, asset_code=str(510300+i), asset_name='ETF') for i in (1, 2)]
+    context = SimpleNamespace(bot_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
+    snapshot = OpportunitySnapshot(2, '510302', 'ETF', '000922', '红利', '2026-08-24T14:50:00+08:00',
+        technical_price_basis='qfq_history_close', technical_price_date='2026-08-21',
+        data_notes=['实时行情不可用，使用最近确认的 qfq 收盘价'])
+    monkeypatch.setattr(jobs, 'is_trading_day', lambda now: True)
+    monkeypatch.setattr(jobs, 'db_execute', Mock(side_effect=[[{'user_id':9}], rules]))
+    quotes = AsyncMock(return_value=({}, False))
+    monkeypatch.setattr(jobs, '_fetch_all_realtime_quotes', quotes)
+    history = AsyncMock(return_value={})
+    monkeypatch.setattr(jobs, '_load_opportunity_history', history)
+    evaluate = AsyncMock(side_effect=[RuntimeError('provider failed'), snapshot])
+    monkeypatch.setattr(jobs, 'evaluate_opportunity', evaluate)
+    monkeypatch.setattr(jobs, 'save_opportunity_snapshot', Mock())
+    monkeypatch.setattr(jobs, 'record_rule_evaluation', Mock())
+    asyncio.run(jobs.daily_briefing_job(context))
+    assert evaluate.await_count == 2
+    assert all(call.kwargs['fetch_quote'] is False for call in evaluate.await_args_list)
+    quotes.assert_awaited_once()
+    history.assert_awaited_once()
+    message = context.bot.send_message.await_args.kwargs['text']
+    assert '查询失败' in message and '/opcheck 1' in message
+    assert '历史收盘价' in message and '2026-08-21' in message
+
+
+def test_monitor_uses_persisted_daily_high_for_upgrade_deduplication(monkeypatch):
+    from src import jobs
+    from src.opportunity import OpportunitySnapshot
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.execute('CREATE TABLE opportunity_snapshots (rule_id INTEGER, snapshot_at TEXT, alert_sent INTEGER, level TEXT)')
+    conn.executemany('INSERT INTO opportunity_snapshots VALUES (1, ?, ?, ?)', [
+        ('2026-08-23T14:00:00+08:00', 1, 'RARE'),
+        ('2026-08-24T10:00:00+08:00', 1, 'STRONG'),
+        ('2026-08-24T11:00:00+08:00', 1, 'MODERATE'),
+        ('2026-08-24T12:00:00+08:00', 0, 'RARE'),
+    ])
+
+    def query(sql, params=(), fetchone=False, fetchall=False, **kwargs):
+        cursor = conn.execute(sql, params)
+        return cursor.fetchone() if fetchone else cursor.fetchall()
+
+    monkeypatch.setattr(jobs, 'db_execute', query)
+    now = datetime.fromisoformat('2026-08-24T14:00:00+08:00')
+    assert jobs._opportunity_alerts_today(1, now) == 2
+    snapshot = OpportunitySnapshot(1, '510300', 'ETF', '000922', '红利', now.isoformat(),
+        total_score=77, level='STRONG', technical_price_basis='qfq_realtime')
+    rule = dict(id=1, user_id=9, asset_code='510300', min_score=60,
+        last_score=69, last_level='MODERATE', last_alert_level='MODERATE',
+        last_alert_at='2026-08-24T11:00:00+08:00')
+    monkeypatch.setattr(jobs, 'evaluate_opportunity', AsyncMock(return_value=snapshot))
+    send = AsyncMock(return_value=True)
+    monkeypatch.setattr(jobs, '_send_opportunity_alert', send)
+    monkeypatch.setattr(jobs, 'snapshot_should_persist', lambda *args, **kwargs: False)
+    monkeypatch.setattr(jobs, 'record_rule_evaluation', Mock())
+    monkeypatch.setattr(jobs, 'record_rule_alert', Mock())
+    context = SimpleNamespace(bot_data={})
+    asyncio.run(jobs._evaluate_opportunity_rules(context, [rule], {'510300': object()}, {}, now))
+    send.assert_not_awaited()
+    snapshot.level, snapshot.total_score = 'RARE', 86
+    asyncio.run(jobs._evaluate_opportunity_rules(context, [rule], {'510300': object()}, {}, now))
+    send.assert_awaited_once()
+    conn.close()

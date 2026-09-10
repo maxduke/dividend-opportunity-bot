@@ -10,7 +10,7 @@ from datetime import datetime
 from functools import wraps
 from zoneinfo import ZoneInfo
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
@@ -20,6 +20,7 @@ from .config import (
     BRIEFING_TIMES_STR,
     CSI_DIVIDEND_YIELD_FIELD,
     ENABLE_AKSHARE_PROXY_PATCH,
+    ENABLE_INTRADAY_MONITOR,
     ETF_PREFIXES,
     KEY_CACHE_DATE,
     KEY_HIST_CACHE,
@@ -64,6 +65,60 @@ from .valuation_fetcher import backfill_cn10y, get_cached_valuation
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _briefing_times():
+    valid = []
+    for value in BRIEFING_TIMES_STR.split(","):
+        try:
+            hour, minute = map(int, value.strip().split(":"))
+            if 0 <= hour < 24 and 0 <= minute < 60:
+                valid.append(f"{hour:02d}:{minute:02d}")
+        except ValueError:
+            continue
+    return sorted(set(valid))
+
+
+def _delivery_guidance(user_id):
+    row = db_execute(
+        "SELECT daily_briefing_enabled FROM whitelist WHERE user_id = ?",
+        (user_id,), fetchone=True, swallow_errors=False,
+    )
+    enabled = bool(row and row["daily_briefing_enabled"])
+    times = _briefing_times()
+    lines = [f"盘中自动告警：{'开启' if ENABLE_INTRADAY_MONITOR else '关闭'}"]
+    markup = None
+    if not times:
+        lines.append("每日简报：管理员尚未配置发送时间，请联系管理员开启。")
+    else:
+        lines.append(f"每日简报：{'开启' if enabled else '关闭'}")
+        lines.append(f"发送安排：交易日 {'、'.join(times)}（上海时间）")
+        if not enabled:
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(
+                "开启每日简报", callback_data=f"briefing_on:{user_id}"
+            )]])
+    if not ENABLE_INTRADAY_MONITOR and not (enabled and times):
+        lines.append("当前仅支持手动查询，不会自动推送。使用 /opcheck 查看评分。")
+    return "\n".join(lines), markup
+
+
+async def enable_briefing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    if query.data != f"briefing_on:{user_id}" or not is_whitelisted(user_id):
+        await query.answer("此按钮仅限原用户使用，且需要白名单权限。", show_alert=True)
+        return
+    if not _briefing_times():
+        await query.answer("管理员尚未配置简报时间，请联系管理员。", show_alert=True)
+        return
+    db_execute(
+        "UPDATE whitelist SET daily_briefing_enabled = 1 WHERE user_id = ?",
+        (user_id,), swallow_errors=False,
+    )
+    await query.answer("已开启每日简报")
+    await query.edit_message_reply_markup(reply_markup=None)
+    guidance, _ = _delivery_guidance(user_id)
+    await query.message.reply_text("✅ 已开启每日简报\n\n" + guidance)
 
 
 def whitelisted_only(func):
@@ -252,13 +307,16 @@ async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEF
         save_opportunity_snapshot(snapshot, critical=True)
         record_rule_evaluation(rule["id"], snapshot)
         creation_complete = True
+        guidance, markup = _delivery_guidance(update.effective_user.id)
         await sent_message.edit_text(
             "✅ 红利机会监控已创建\n\n"
             f"资产：{asset_name} ({asset_code})\n"
             f"估值基准：{benchmark_name} ({benchmark_code})\n\n"
             f"当前评分：{snapshot.total_score:.0f} / 100\n"
             f"机会等级：{OPPORTUNITY_LEVEL_LABELS.get(snapshot.level, snapshot.level)}\n\n"
-            "提示：机器人只验证两端数据可用，不会自动验证资产实际跟踪该估值基准，请自行核对。"
+            f"{guidance}\n\n"
+            "提示：机器人只验证两端数据可用，不会自动验证资产实际跟踪该估值基准，请自行核对。",
+            reply_markup=markup,
         )
     except ValueError:
         await update.message.reply_text("最低评分必须是数字。")

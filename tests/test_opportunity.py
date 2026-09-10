@@ -418,3 +418,39 @@ def test_spread_maturity_uses_dates_of_matched_observations():
 
     assert len(spreads) == 300
     assert _history_maturity(spreads)[2] is False
+
+
+def test_repeated_upgrade_cannot_bypass_daily_limit():
+    now = datetime.fromisoformat('2026-08-13T14:00:00+08:00')
+    rule = _rule(last_score=69, last_level='MODERATE',
+                 last_alert_at='2026-08-13T13:59:00+08:00', last_alert_level='STRONG')
+    assert should_send_opportunity_alert(rule, _snapshot(77, 'STRONG'), now,
+        alerts_today=20, highest_alert_level_today='STRONG') == (False, 'already-alerted-level')
+    assert should_send_opportunity_alert(rule, _snapshot(86, 'RARE'), now,
+        alerts_today=20, highest_alert_level_today='STRONG')[0]
+
+
+def test_earlier_daily_high_survives_lower_later_alert_and_restart():
+    now = datetime.fromisoformat('2026-08-13T14:00:00+08:00')
+    rule = _rule(last_score=69, last_level='MODERATE',
+                 last_alert_at='2026-08-13T10:00:00+08:00', last_alert_level='MODERATE')
+    assert not should_send_opportunity_alert(rule, _snapshot(77, 'STRONG'), now,
+        alerts_today=2, highest_alert_level_today='STRONG')[0]
+
+
+def test_previous_day_high_does_not_block_new_day_after_cooldown():
+    now = datetime.fromisoformat('2026-08-14T10:00:00+08:00')
+    rule = _rule(last_score=69, last_level='MODERATE',
+                 last_alert_at='2026-08-13T14:00:00+08:00', last_alert_level='STRONG')
+    assert should_send_opportunity_alert(rule, _snapshot(77, 'STRONG'), now)[0]
+
+
+def test_evaluation_can_skip_failed_quote_without_retry(monkeypatch):
+    from src import opportunity
+    provider = AsyncMock(side_effect=AssertionError('must not retry known quote outage'))
+    monkeypatch.setattr(opportunity, '_fetch_all_realtime_quotes', provider)
+    monkeypatch.setattr(opportunity, 'get_history_data_cached', AsyncMock(return_value=None))
+    monkeypatch.setattr(opportunity, 'get_cached_valuation', AsyncMock(return_value=None))
+    snapshot = asyncio.run(evaluate_opportunity(_rule(), SimpleNamespace(bot_data={}), fetch_quote=False))
+    provider.assert_not_awaited()
+    assert snapshot.technical_price_basis == 'unavailable'
