@@ -266,7 +266,7 @@ def test_commands_ignore_edited_messages():
     assert not handler.check_update(_command_update("/opcheck 1", edited=True))
 
 
-@pytest.mark.parametrize("args", [[], ["1", "2"], ["0"], ["-3"], ["x"], [str(2**63)]])
+@pytest.mark.parametrize("args", [[], ["1", "2"], ["0"], ["-3"], ["x"], [str(2**63)], ["١٢"], ["1_000"], ["+5"], [" 5"]])
 def test_positive_id_rejects_invalid_or_unbindable_values(args):
     from src.handlers import _positive_id
 
@@ -349,3 +349,22 @@ def test_addop_internal_value_error_is_not_reported_as_bad_score(monkeypatch):
     asyncio.run(handlers._add_opportunity_rule(update, SimpleNamespace(bot_data={}), ("510300", "000922", "60")))
 
     assert reply.await_args.args[0] == "添加红利机会监控规则时发生内部错误。"
+
+
+def test_opthreshold_storage_error_is_not_reported_as_format_error(monkeypatch):
+    from src import handlers, rule_ui
+
+    reply = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=9),
+        message=SimpleNamespace(reply_text=reply),
+    )
+    monkeypatch.setattr(handlers, "is_whitelisted", lambda user_id: True)
+    monkeypatch.setattr(rule_ui, "owned_rule", Mock(side_effect=ValueError("row decode failure")))
+
+    with pytest.raises(ValueError, match="row decode failure"):
+        asyncio.run(handlers.threshold_opportunity_command.__wrapped__(
+            update, SimpleNamespace(args=["7", "70"], bot_data={})
+        ))
+
+    reply.assert_not_awaited()

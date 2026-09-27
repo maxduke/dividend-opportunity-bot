@@ -79,6 +79,8 @@ DB_FILE = os.getenv('DB_FILE', 'rules.db')
 
 # --- 监控参数配置 ---
 RSI_PERIOD = _parse_int('RSI_PERIOD', 6)
+# User-visible indicator name; stored columns keep the machine name ``rsi6``.
+RSI_LABEL = f"RSI{RSI_PERIOD}"
 # Opportunity technical history is always forward-adjusted.  This is a
 # correctness invariant, not an end-user scoring switch.
 PRICE_ADJUSTMENT = 'qfq'

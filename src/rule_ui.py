@@ -132,10 +132,15 @@ async def _run_query(message, context, user_id, rules, work):
     return f'查询完成：成功 {succeeded} 条，失败 {failed} 条，因规则变更跳过 {skipped} 条。'
 
 
-def set_threshold(user_id, rule_id, value):
+def parse_threshold(value) -> float:
     score = float(value)
     if not math.isfinite(score) or not 0 <= score <= 100:
         raise ValueError('threshold out of range')
+    return score
+
+
+def set_threshold(user_id, rule_id, value):
+    score = parse_threshold(value)
     if owned_rule(user_id, rule_id) is None:
         return False
     db_execute('UPDATE opportunity_rules SET min_score = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND user_id = ?',

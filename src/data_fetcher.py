@@ -149,8 +149,8 @@ def _is_trading_day(now: datetime) -> bool:
     try:
         return bool(is_trading_day(now))
     except Exception as exc:
-        # Calendar outages must not manufacture a bar on an obvious weekend.
-        logger.warning("交易日历不可用，使用工作日保守回退: %s", exc)
+        # An unknown session must never gain a synthetic realtime bar.
+        logger.warning("交易日历不可用，按非交易日处理: %s", exc)
         return False
 
 

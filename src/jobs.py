@@ -26,7 +26,6 @@ from .config import (
     ENABLE_INTRADAY_MONITOR,
     OPPORTUNITY_LEVEL_LABELS,
     REQUEST_INTERVAL_SECONDS,
-    RSI_PERIOD,
     SCORING_MODE_LABELS,
     TECHNICAL_HISTORY_DAYS,
 )
@@ -38,10 +37,17 @@ from .data_fetcher import (
     runtime_history_is_usable,
 )
 from .database import db_execute, rule_is_current
-from .market import calendar_covers, ensure_trade_days_loaded, is_market_hours, is_trading_day
+from .market import (
+    calendar_covers,
+    ensure_trade_days_loaded,
+    is_market_hours,
+    is_session_time,
+    is_trading_day,
+)
 from .metrics import level_icon, level_rank
 from .opportunity import (
     evaluate_opportunity,
+    format_metric_lines,
     format_opportunity_alert,
     record_rule_alert,
     record_rule_evaluation,
@@ -54,6 +60,9 @@ from .utils import split_message
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 CALENDAR_ALERT_DATE_KEY = "calendar_unavailable_alert_date"
+CALENDAR_UNKNOWN_SINCE_KEY = "calendar_unknown_since"
+# Several calendar retries fit in this window, so a single startup timeout is quiet.
+CALENDAR_ALERT_GRACE = timedelta(minutes=5)
 
 
 def _retry_after_seconds(exc: RetryAfter) -> int:
@@ -63,18 +72,19 @@ def _retry_after_seconds(exc: RetryAfter) -> int:
     return int(retry_after) + 1
 
 
-async def _warn_if_calendar_unavailable(context, now):
-    """Alert the admin once per day when today's session status is unknown.
+async def _warn_if_calendar_unavailable(context, now, grace=timedelta(0)):
+    """Alert the admin once per day when today's session status stays unknown.
 
     Jobs still skip such days: guessing a session could publish holiday data.
     """
     today = now.date()
     if today.weekday() >= 5 or calendar_covers(today):
+        context.bot_data.pop(CALENDAR_UNKNOWN_SINCE_KEY, None)
         return
-    if context.bot_data.get(CALENDAR_ALERT_DATE_KEY) == today:
+    unknown_since = context.bot_data.setdefault(CALENDAR_UNKNOWN_SINCE_KEY, now)
+    if now - unknown_since < grace or context.bot_data.get(CALENDAR_ALERT_DATE_KEY) == today:
         return
-    context.bot_data[CALENDAR_ALERT_DATE_KEY] = today
-    logger.error("交易日历无法确认 %s 是否为交易日，每日简报和盘中监控将跳过。", today)
+    logger.warning("交易日历无法确认 %s 是否为交易日，每日简报和盘中监控将跳过。", today)
     try:
         await context.bot.send_message(
             chat_id=ADMIN_USER_ID,
@@ -86,7 +96,10 @@ async def _warn_if_calendar_unavailable(context, now):
             ),
         )
     except Exception as exc:
-        logger.error("向管理员发送交易日历告警失败: %s", exc)
+        # Leave the date unmarked so the next job run retries the alert.
+        logger.warning("向管理员发送交易日历告警失败: %s", exc)
+        return
+    context.bot_data[CALENDAR_ALERT_DATE_KEY] = today
 
 
 async def _load_opportunity_history(context, codes, now):
@@ -121,7 +134,9 @@ async def _check_opportunity_job(context: ContextTypes.DEFAULT_TYPE):
     if not ENABLE_INTRADAY_MONITOR:
         return
     await ensure_trade_days_loaded()
-    await _warn_if_calendar_unavailable(context, datetime.now(SHANGHAI_TZ))
+    current = datetime.now(SHANGHAI_TZ)
+    if is_session_time(current):
+        await _warn_if_calendar_unavailable(context, current, grace=CALENDAR_ALERT_GRACE)
     if not is_market_hours():
         return
 
@@ -338,23 +353,6 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
                 message += "⚠️ 实时行情未用于评分，本条使用历史收盘价。\n"
                 if snapshot.data_notes:
                     message += html.escape(snapshot.data_notes[0]) + "\n"
-            dy = (
-                f"{snapshot.dividend_yield_used:.2f}%"
-                if snapshot.dividend_yield_used is not None else "暂无"
-            )
-            spread = (
-                f"{snapshot.dividend_bond_spread:.2f} 个百分点"
-                if snapshot.dividend_bond_spread is not None else "暂无"
-            )
-            ma = (
-                f"{snapshot.ma200_deviation * 100:.1f}%"
-                if snapshot.ma200_deviation is not None else "暂无"
-            )
-            drawdown = (
-                f"{snapshot.drawdown_52w * 100:.1f}%"
-                if snapshot.drawdown_52w is not None else "暂无"
-            )
-            rsi = f"{snapshot.rsi6:.1f}" if snapshot.rsi6 is not None else "暂无"
             technically_degraded = snapshot.technical_price_basis == "unavailable"
             displayed_quality = "DEGRADED" if technically_degraded else snapshot.data_quality
             message += (
@@ -363,11 +361,8 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
                 f"  模式：<code>{html.escape(SCORING_MODE_LABELS.get(snapshot.scoring_mode, snapshot.scoring_mode))}</code> | 数据：<code>{html.escape(DATA_QUALITY_LABELS.get(displayed_quality, displayed_quality))}</code>\n"
                 f"  技术数据：{'不可用' if technically_degraded else '可用'}\n"
                 f"  截至：价格 {html.escape(snapshot.technical_price_date or '暂无')} | 估值 {html.escape(snapshot.valuation_date or '暂无')}\n"
-                f"  股息率：{dy}\n"
-                f"  股息率—国债利差：{spread}\n"
-                f"  MA200 偏离度：{ma}\n"
-                f"  52 周回撤：{drawdown}\n"
-                f"  RSI({RSI_PERIOD})：{rsi}\n\n"
+                + "".join(f"  {line}\n" for line in format_metric_lines(snapshot))
+                + "\n"
             )
         try:
             for chunk in split_message(message):

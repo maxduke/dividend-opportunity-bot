@@ -20,6 +20,7 @@ from src.opportunity import (
     save_opportunity_snapshot,
     should_send_opportunity_alert,
 )
+from src.valuation_fetcher import BondCurve
 
 
 def _rule(**changes):
@@ -414,7 +415,7 @@ def test_spread_maturity_uses_dates_of_matched_observations():
         for row in valuation_rows
     ]
 
-    spreads = _history_spreads(valuation_rows, bond_rows, "股息率2")
+    spreads = _history_spreads(valuation_rows, BondCurve(bond_rows), "股息率2")
 
     assert len(spreads) == 300
     assert _history_maturity(spreads)[2] is False
@@ -471,7 +472,7 @@ def test_history_spreads_use_latest_prior_bond_within_seven_days():
         {"yield_date": "2026-08-10", "cn10y": 1.8},
     ]
 
-    spreads = _history_spreads(valuation_rows, bond_rows, "股息率2")
+    spreads = _history_spreads(valuation_rows, BondCurve(bond_rows), "股息率2")
 
     # 2026-09-10 has no bond within 7 days and is skipped.
     assert spreads == [
@@ -511,3 +512,26 @@ def test_level_icons_come_from_scoring_config():
     assert [level_icon(level) for level in ("NEUTRAL", "WATCH", "MODERATE", "STRONG", "RARE", None)] == [
         "⚪", "🟡", "🟢", "🟢", "🔥", "⚪",
     ]
+
+
+def test_alert_and_briefing_share_metric_lines():
+    from src.config import RSI_LABEL
+    from src.opportunity import format_metric_lines
+
+    snapshot = _snapshot(78, "STRONG")
+    snapshot.dividend_yield_used = 5.42
+    snapshot.dividend_bond_spread = 3.6
+    snapshot.ma200_deviation = -0.0712
+    snapshot.drawdown_52w = None
+    snapshot.rsi6 = 28.44
+
+    lines = format_metric_lines(snapshot)
+
+    assert lines == [
+        "股息率：5.42%",
+        "股息率—国债利差：3.60 个百分点",
+        "MA200 偏离度：-7.1%",
+        "52 周回撤：暂无",
+        f"{RSI_LABEL}：28.4",
+    ]
+    assert "\n".join(lines) in format_opportunity_alert(snapshot)

@@ -184,24 +184,48 @@ def test_trading_sessions_elapsed_returns_none_when_provider_calendar_unavailabl
     assert market.trading_sessions_elapsed(target - timedelta(days=1), target) is None
 
 
+
+def _empty_calendar_cache():
+    return {
+        "days": None, "first": None, "last": None,
+        "loaded_on": None, "failed_at": None, "retry_after": market.CALENDAR_FAILURE_RETRY,
+    }
+
+
 def test_calendar_covers_local_range_and_loaded_provider_range(monkeypatch):
+    now = datetime(2026, 8, 24, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
-    monkeypatch.setattr(market, "_trade_day_cache", {"days": None, "loaded_on": None, "failed_at": None})
+    monkeypatch.setattr(market, "_trade_day_cache", _empty_calendar_cache())
     assert market.calendar_covers(date(2025, 6, 2))
     assert not market.calendar_covers(date(2026, 8, 24))
 
-    market._trade_day_cache["days"] = {date(2026, 1, 5), date(2026, 12, 31)}
+    market._record_calendar_load({date(2026, 1, 5), date(2026, 12, 31)}, now, now.date())
     assert market.calendar_covers(date(2026, 8, 24))
     # Beyond the provider's published year "not in set" does not mean holiday.
     assert not market.calendar_covers(date(2027, 1, 4))
 
 
 def test_trading_sessions_elapsed_is_unknown_past_provider_calendar(monkeypatch):
+    trade_days = {date(2026, 12, 30), date(2026, 12, 31)}
     monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
-    monkeypatch.setattr(
-        market,
-        "_trade_day_cache",
-        {"days": {date(2026, 12, 30), date(2026, 12, 31)}, "loaded_on": date(2026, 12, 31), "failed_at": None},
-    )
+    monkeypatch.setattr(market, "_trade_day_cache", _empty_calendar_cache())
+    # Offline fake provider; ordinary tests must never reach AKShare.
+    monkeypatch.setattr(market, "_load_trade_days_from_ak", lambda: set(trade_days))
+
     assert market.trading_sessions_elapsed(date(2026, 12, 30), date(2026, 12, 31)) == 1
     assert market.trading_sessions_elapsed(date(2026, 12, 31), date(2027, 1, 4)) is None
+
+
+def test_successful_load_that_misses_today_retries_the_same_day(monkeypatch):
+    tz = ZoneInfo("Asia/Shanghai")
+    now = datetime(2027, 1, 4, 9, tzinfo=tz)
+    cache = _empty_calendar_cache()
+    monkeypatch.setattr(market, "_trade_day_cache", cache)
+
+    market._record_calendar_load({date(2026, 12, 31)}, now, now.date())
+    assert not market._calendar_refresh_due(now + market.CALENDAR_FAILURE_RETRY)
+    assert market._calendar_refresh_due(now + market.CALENDAR_UNCOVERED_RETRY)
+
+    market._record_calendar_load({date(2026, 12, 31), date(2027, 1, 4)}, now, now.date())
+    assert cache["failed_at"] is None
+    assert not market._calendar_refresh_due(now + market.CALENDAR_UNCOVERED_RETRY)

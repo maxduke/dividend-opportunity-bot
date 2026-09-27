@@ -64,13 +64,14 @@ from .user_tasks import AccessRevoked, task_manager
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _CODE_RE = re.compile(r"[0-9]{6}")
+_ID_RE = re.compile(r"[0-9]+")
 _MAX_SQLITE_INTEGER = 2**63 - 1
 
 
 def _positive_id(args) -> int:
-    """Parse exactly one positive ID that SQLite can bind; raise ValueError otherwise."""
-    if len(args) != 1:
-        raise ValueError("expected exactly one ID")
+    """Parse exactly one positive ASCII ID that SQLite can bind; raise ValueError otherwise."""
+    if len(args) != 1 or not _ID_RE.fullmatch(args[0]):
+        raise ValueError("expected exactly one ASCII ID")
     value = int(args[0])
     if not 0 < value <= _MAX_SQLITE_INTEGER:
         raise ValueError("ID out of range")
@@ -196,7 +197,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /proxy_status [refresh] - 查看 AKShare Proxy 状态
 
 <b>全局配置：</b>
-- RSI6 周期（红利机会战术因子）：<b>{RSI_PERIOD}</b>
+- RSI 周期（红利机会战术因子）：<b>{RSI_PERIOD}</b>
 - 技术价格: <b>{PRICE_ADJUSTMENT}</b>
 - 请求间隔: <b>{REQUEST_INTERVAL_SECONDS}秒</b>
 - 每日简报: <b>{BRIEFING_TIMES_STR}</b>
@@ -406,18 +407,20 @@ async def check_opportunity_command(update: Update, context: ContextTypes.DEFAUL
 
 @whitelisted_only
 async def threshold_opportunity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from .rule_ui import set_threshold
+    from .rule_ui import parse_threshold, set_threshold
 
     try:
         if len(context.args) != 2:
             raise ValueError
         rule_id = _positive_id(context.args[:1])
-        updated = set_threshold(update.effective_user.id, rule_id, context.args[1])
+        score = parse_threshold(context.args[1])
     except ValueError:
         await update.message.reply_text("正确格式：/opthreshold <规则 ID> <0–100 的分数>")
         return
+    # Only argument parsing maps to the format hint; storage errors reach the error handler.
+    updated = set_threshold(update.effective_user.id, rule_id, score)
     await update.message.reply_text(
-        f"✅ 规则 {rule_id} 告警阈值已更新为 {float(context.args[1]):g}。监控状态和历史记录已保留。"
+        f"✅ 规则 {rule_id} 告警阈值已更新为 {score:g}。监控状态和历史记录已保留。"
         if updated else "未找到该规则，或规则不属于您。"
     )
 

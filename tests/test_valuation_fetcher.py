@@ -226,3 +226,20 @@ def test_sina_fallback_does_not_overwrite_chinabond(monkeypatch, tmp_path):
 
     assert row["cn10y"] == 1.82
     assert row["source"] == "chinabond"
+
+
+def test_latest_bond_query_is_bounded_to_gap_window(monkeypatch):
+    from datetime import date
+    from src import valuation_fetcher
+
+    calls = []
+
+    def history(**kwargs):
+        calls.append(kwargs)
+        return [{"yield_date": "2026-08-10", "cn10y": 1.8, "source": "chinabond"}]
+
+    monkeypatch.setattr(valuation_fetcher, "get_bond_history", history)
+
+    assert valuation_fetcher.latest_bond_on_or_before(date(2026, 8, 13))["cn10y"] == 1.8
+    assert calls == [{"start_date": date(2026, 8, 6), "end_date": date(2026, 8, 13)}]
+    assert valuation_fetcher.latest_bond_on_or_before(date(2026, 8, 18)) is None

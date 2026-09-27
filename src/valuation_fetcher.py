@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from bisect import bisect_right
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -313,22 +314,34 @@ def persist_bond_rows(frame: Optional[pd.DataFrame], source: str, fetched_at: Op
     return len(rows)
 
 
+class BondCurve:
+    """CN10Y rows indexed once by date for repeated as-of lookups."""
+
+    def __init__(self, rows):
+        dated = []
+        for row in rows:
+            try:
+                row_date = date.fromisoformat(str(row["yield_date"])[:10])
+            except (KeyError, TypeError, ValueError):
+                continue
+            dated.append((row_date, row))
+        dated.sort(key=lambda item: item[0])
+        self._dates = [row_date for row_date, _ in dated]
+        self._rows = [row for _, row in dated]
+
+    def as_of(self, target_date: date, max_gap_days: int = 7):
+        """Latest row on or before ``target_date``; never a future observation."""
+        position = bisect_right(self._dates, target_date)
+        if not position or (target_date - self._dates[position - 1]).days > max_gap_days:
+            return None
+        return self._rows[position - 1]
+
+
 def latest_bond_on_or_before(target_date: date, max_gap_days: int = 7):
-    rows = get_bond_history(end_date=target_date)
-    if not rows:
-        return None
-    candidates = []
-    for row in rows:
-        try:
-            row_date = date.fromisoformat(row["yield_date"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if row_date <= target_date:
-            candidates.append((row_date, row))
-    if not candidates:
-        return None
-    row_date, row = max(candidates, key=lambda item: item[0])
-    return row if (target_date - row_date).days <= max_gap_days else None
+    rows = get_bond_history(
+        start_date=target_date - timedelta(days=max_gap_days), end_date=target_date
+    )
+    return BondCurve(rows).as_of(target_date, max_gap_days)
 
 
 async def get_cached_cn10y(bot_data: dict):

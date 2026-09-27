@@ -19,7 +19,12 @@ _LOCAL_HOLIDAYS = CHINA_CALENDAR.adhoc_holidays
 LOCAL_CALENDAR_COVERAGE_START = _LOCAL_HOLIDAYS.min().date()
 LOCAL_CALENDAR_COVERAGE_END = _LOCAL_HOLIDAYS.max().date()
 CALENDAR_FAILURE_RETRY = timedelta(minutes=1)
-_trade_day_cache = {"days": None, "loaded_on": None, "failed_at": None}
+# A load that succeeds but predates the provider's next-year publication.
+CALENDAR_UNCOVERED_RETRY = timedelta(minutes=30)
+_trade_day_cache = {
+    "days": None, "first": None, "last": None,
+    "loaded_on": None, "failed_at": None, "retry_after": CALENDAR_FAILURE_RETRY,
+}
 _trade_day_refresh_lock = asyncio.Lock()
 _trade_day_refresh_task = None
 
@@ -40,10 +45,23 @@ def _load_trade_days_from_ak() -> set | None:
 
 def _calendar_refresh_due(now: datetime) -> bool:
     failed_at = _trade_day_cache.get("failed_at")
-    return (
-        _trade_day_cache.get("loaded_on") != now.date()
-        and (failed_at is None or now - failed_at >= CALENDAR_FAILURE_RETRY)
+    if failed_at is not None:
+        return now - failed_at >= _trade_day_cache.get("retry_after", CALENDAR_FAILURE_RETRY)
+    return _trade_day_cache.get("loaded_on") != now.date()
+
+
+def _record_calendar_load(trade_days: set | None, now: datetime, target_date: date) -> None:
+    """Store a provider result; a load that cannot classify ``target_date`` retries today."""
+    if not trade_days:
+        _trade_day_cache.update(failed_at=now, retry_after=CALENDAR_FAILURE_RETRY)
+        return
+    _trade_day_cache.update(
+        days=trade_days, first=min(trade_days), last=max(trade_days), loaded_on=now.date(),
     )
+    if calendar_covers(target_date):
+        _trade_day_cache.update(failed_at=None, retry_after=CALENDAR_FAILURE_RETRY)
+    else:
+        _trade_day_cache.update(failed_at=now, retry_after=CALENDAR_UNCOVERED_RETRY)
 
 
 async def ensure_trade_days_loaded(check_date: datetime | None = None) -> None:
@@ -79,12 +97,7 @@ async def ensure_trade_days_loaded(check_date: datetime | None = None) -> None:
             trade_days = None
         if _trade_day_refresh_task.done():
             _trade_day_refresh_task = None
-        if trade_days is None:
-            _trade_day_cache["failed_at"] = now
-        else:
-            _trade_day_cache["days"] = trade_days
-            _trade_day_cache["loaded_on"] = now.date()
-            _trade_day_cache["failed_at"] = None
+        _record_calendar_load(trade_days, now, cn_date)
 
 
 def is_trading_day(check_date: datetime) -> bool:
@@ -102,13 +115,7 @@ def is_trading_day(check_date: datetime) -> bool:
     else:
         running_async_context = True
     if not running_async_context and _calendar_refresh_due(now):
-        trade_days = _load_trade_days_from_ak()
-        if trade_days is None:
-            _trade_day_cache["failed_at"] = now
-        else:
-            _trade_day_cache["days"] = trade_days
-            _trade_day_cache["loaded_on"] = now.date()
-            _trade_day_cache["failed_at"] = None
+        _record_calendar_load(_load_trade_days_from_ak(), now, cn_date)
 
     trade_days = _trade_day_cache["days"]
     return isinstance(trade_days, set) and cn_date in trade_days
@@ -122,10 +129,8 @@ def calendar_covers(cn_date: date) -> bool:
     """
     if LOCAL_CALENDAR_COVERAGE_START <= cn_date <= LOCAL_CALENDAR_COVERAGE_END:
         return True
-    trade_days = _trade_day_cache.get("days")
-    return bool(trade_days) and isinstance(trade_days, set) and (
-        min(trade_days) <= cn_date <= max(trade_days)
-    )
+    first, last = _trade_day_cache.get("first"), _trade_day_cache.get("last")
+    return first is not None and first <= cn_date <= last
 
 
 def trading_sessions_elapsed(start_date: date, end_date: date) -> int | None:
@@ -158,11 +163,14 @@ def trading_sessions_elapsed(start_date: date, end_date: date) -> int | None:
     return sessions
 
 
-def is_market_hours() -> bool:
-    now = datetime.now(SHANGHAI_TZ)
-    if not is_trading_day(now):
-        return False
+def is_session_time(now: datetime) -> bool:
+    """Whether the wall-clock time falls in an XSHG continuous-trading session."""
     time_now = now.time()
     return (time(9, 30) <= time_now <= time(11, 30)) or (
         time(13, 0) <= time_now <= time(15, 0)
     )
+
+
+def is_market_hours() -> bool:
+    now = datetime.now(SHANGHAI_TZ)
+    return is_trading_day(now) and is_session_time(now)
