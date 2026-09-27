@@ -5,7 +5,7 @@ from datetime import time
 from zoneinfo import ZoneInfo
 
 from telegram import BotCommand
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, filters
 
 from .config import (
     BRIEFING_TIMES_STR,
@@ -68,7 +68,12 @@ async def post_init(application: Application):
 
 
 async def error_handler(update: object, context) -> None:
-    logger.error("未捕获的异常: %s", context.error)
+    logger.error("未捕获的异常: %s", context.error, exc_info=context.error)
+
+
+def _command(name, callback):
+    # Edited messages have no ``update.message``; editing must not re-run a command.
+    return CommandHandler(name, callback, filters=filters.UpdateType.MESSAGE)
 
 
 def _register_intraday_job(job_queue, job, enabled: bool = ENABLE_INTRADAY_MONITOR):
@@ -116,23 +121,23 @@ def main():
             CallbackQueryHandler(enable_briefing_callback, pattern=r"^briefing_on:\d+$"),
             CallbackQueryHandler(rule_callback, pattern=r"^op:"),
             CallbackQueryHandler(cancel_callback, pattern=r"^task:"),
-            CommandHandler("task", task_command),
-            CommandHandler("cancel", cancel_command),
-            CommandHandler("start", start_command),
-            CommandHandler("help", help_command),
-            CommandHandler("briefing", briefing_command),
-            CommandHandler("addop", add_opportunity_rule_command),
-            CommandHandler("delop", delete_opportunity_rule_command),
-            CommandHandler("oplist", list_opportunity_rules_command),
-            CommandHandler("opon", toggle_opportunity_rule_command),
-            CommandHandler("opoff", toggle_opportunity_rule_command),
-            CommandHandler("opcheck", check_opportunity_command),
-            CommandHandler("opthreshold", threshold_opportunity_command),
-            CommandHandler("add_w", add_whitelist_command),
-            CommandHandler("del_w", del_whitelist_command),
-            CommandHandler("list_w", list_whitelist_command),
-            CommandHandler("proxy_status", proxy_status_command),
-            CommandHandler("refresh", refresh_cache_command),
+            _command("task", task_command),
+            _command("cancel", cancel_command),
+            _command("start", start_command),
+            _command("help", help_command),
+            _command("briefing", briefing_command),
+            _command("addop", add_opportunity_rule_command),
+            _command("delop", delete_opportunity_rule_command),
+            _command("oplist", list_opportunity_rules_command),
+            _command("opon", toggle_opportunity_rule_command),
+            _command("opoff", toggle_opportunity_rule_command),
+            _command("opcheck", check_opportunity_command),
+            _command("opthreshold", threshold_opportunity_command),
+            _command("add_w", add_whitelist_command),
+            _command("del_w", del_whitelist_command),
+            _command("list_w", list_whitelist_command),
+            _command("proxy_status", proxy_status_command),
+            _command("refresh", refresh_cache_command),
         ]
     )
 

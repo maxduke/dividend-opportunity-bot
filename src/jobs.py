@@ -21,6 +21,7 @@ from telegram.error import Forbidden, RetryAfter
 from telegram.ext import ContextTypes
 
 from .config import (
+    ADMIN_USER_ID,
     DATA_QUALITY_LABELS,
     ENABLE_INTRADAY_MONITOR,
     OPPORTUNITY_LEVEL_LABELS,
@@ -37,8 +38,8 @@ from .data_fetcher import (
     runtime_history_is_usable,
 )
 from .database import db_execute, rule_is_current
-from .market import ensure_trade_days_loaded, is_market_hours, is_trading_day
-from .metrics import level_rank
+from .market import calendar_covers, ensure_trade_days_loaded, is_market_hours, is_trading_day
+from .metrics import level_icon, level_rank
 from .opportunity import (
     evaluate_opportunity,
     format_opportunity_alert,
@@ -52,6 +53,7 @@ from .utils import split_message
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+CALENDAR_ALERT_DATE_KEY = "calendar_unavailable_alert_date"
 
 
 def _retry_after_seconds(exc: RetryAfter) -> int:
@@ -59,6 +61,32 @@ def _retry_after_seconds(exc: RetryAfter) -> int:
     if isinstance(retry_after, timedelta):
         retry_after = retry_after.total_seconds()
     return int(retry_after) + 1
+
+
+async def _warn_if_calendar_unavailable(context, now):
+    """Alert the admin once per day when today's session status is unknown.
+
+    Jobs still skip such days: guessing a session could publish holiday data.
+    """
+    today = now.date()
+    if today.weekday() >= 5 or calendar_covers(today):
+        return
+    if context.bot_data.get(CALENDAR_ALERT_DATE_KEY) == today:
+        return
+    context.bot_data[CALENDAR_ALERT_DATE_KEY] = today
+    logger.error("交易日历无法确认 %s 是否为交易日，每日简报和盘中监控将跳过。", today)
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_USER_ID,
+            text=(
+                "🚨 交易日历不可用\n\n"
+                f"无法确认 {today.isoformat()} 是否为交易日，"
+                "每日简报和盘中监控将跳过，直到日历恢复。\n"
+                "机器人会自动重试加载交易日历。"
+            ),
+        )
+    except Exception as exc:
+        logger.error("向管理员发送交易日历告警失败: %s", exc)
 
 
 async def _load_opportunity_history(context, codes, now):
@@ -93,6 +121,7 @@ async def _check_opportunity_job(context: ContextTypes.DEFAULT_TYPE):
     if not ENABLE_INTRADAY_MONITOR:
         return
     await ensure_trade_days_loaded()
+    await _warn_if_calendar_unavailable(context, datetime.now(SHANGHAI_TZ))
     if not is_market_hours():
         return
 
@@ -229,6 +258,7 @@ async def _evaluate_opportunity_rules(context, rules, quotes, history, now):
 async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(SHANGHAI_TZ)
     await ensure_trade_days_loaded(now)
+    await _warn_if_calendar_unavailable(context, now)
     if not is_trading_day(now):
         logger.info("今天 (%s) 非交易日，跳过每日简报。", now.strftime("%Y-%m-%d"))
         return
@@ -328,7 +358,7 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
             technically_degraded = snapshot.technical_price_basis == "unavailable"
             displayed_quality = "DEGRADED" if technically_degraded else snapshot.data_quality
             message += (
-                f"{OPPORTUNITY_LEVEL_LABELS.get(snapshot.level, snapshot.level)} <b>{html.escape(snapshot.asset_name)}</b> ({snapshot.asset_code})\n"
+                f"{level_icon(snapshot.level)} <b>{html.escape(snapshot.asset_name)}</b> ({snapshot.asset_code})\n"
                 f"  评分：<b>{snapshot.total_score:.0f}</b> | 等级：{OPPORTUNITY_LEVEL_LABELS.get(snapshot.level, snapshot.level)}\n"
                 f"  模式：<code>{html.escape(SCORING_MODE_LABELS.get(snapshot.scoring_mode, snapshot.scoring_mode))}</code> | 数据：<code>{html.escape(DATA_QUALITY_LABELS.get(displayed_quality, displayed_quality))}</code>\n"
                 f"  技术数据：{'不可用' if technically_degraded else '可用'}\n"

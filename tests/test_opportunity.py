@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -454,3 +454,60 @@ def test_evaluation_can_skip_failed_quote_without_retry(monkeypatch):
     snapshot = asyncio.run(evaluate_opportunity(_rule(), SimpleNamespace(bot_data={}), fetch_quote=False))
     provider.assert_not_awaited()
     assert snapshot.technical_price_basis == 'unavailable'
+
+
+def test_history_spreads_use_latest_prior_bond_within_seven_days():
+    valuation_rows = [
+        {"valuation_date": "2026-08-10", "dividend_yield2": 5.0},
+        {"valuation_date": "2026-08-20", "dividend_yield2": 5.0},
+        {"valuation_date": "2026-09-10", "dividend_yield2": 5.0},
+    ]
+    # Unsorted on purpose; the future row must never be matched.
+    bond_rows = [
+        {"yield_date": "2026-08-21", "cn10y": 9.9},
+        {"yield_date": "2026-08-07", "cn10y": 2.0},
+        {"yield_date": "2026-08-18", "cn10y": 1.5},
+        {"yield_date": "bad", "cn10y": 9.9},
+        {"yield_date": "2026-08-10", "cn10y": 1.8},
+    ]
+
+    spreads = _history_spreads(valuation_rows, bond_rows, "股息率2")
+
+    # 2026-09-10 has no bond within 7 days and is skipped.
+    assert spreads == [
+        (date(2026, 8, 10), pytest.approx(3.2)),
+        (date(2026, 8, 20), pytest.approx(3.5)),
+    ]
+
+
+def test_bond_history_query_is_bounded_to_lookback_window(monkeypatch):
+    from src import opportunity
+
+    valuation = {
+        "valuation_date": "2026-08-24", "dividend_yield1": 5.1, "dividend_yield2": 5.2,
+        "pe1": 8.0, "pe2": 7.9,
+    }
+    bond_history = Mock(return_value=[])
+    monkeypatch.setattr(opportunity, "_now", lambda: datetime.fromisoformat("2026-08-24T10:00:00+08:00"))
+    monkeypatch.setattr(opportunity, "ensure_trade_days_loaded", AsyncMock())
+    monkeypatch.setattr(opportunity, "get_history_data_cached", AsyncMock(return_value=None))
+    monkeypatch.setattr(opportunity, "get_cached_valuation", AsyncMock(return_value=valuation))
+    monkeypatch.setattr(opportunity, "get_valuation_history", lambda *args: [])
+    monkeypatch.setattr(opportunity, "get_cached_cn10y", AsyncMock(return_value=None))
+    monkeypatch.setattr(opportunity, "get_bond_history", bond_history)
+    monkeypatch.setattr(opportunity, "trading_sessions_elapsed", lambda *args: 0)
+
+    asyncio.run(evaluate_opportunity(_rule(), SimpleNamespace(bot_data={}), fetch_quote=False))
+
+    lookback_start = date(2026 - opportunity.VALUATION_PERCENTILE_LOOKBACK_YEARS, 8, 24)
+    bond_history.assert_called_once_with(
+        start_date=lookback_start - timedelta(days=7), end_date=date(2026, 8, 24)
+    )
+
+
+def test_level_icons_come_from_scoring_config():
+    from src.metrics import level_icon
+
+    assert [level_icon(level) for level in ("NEUTRAL", "WATCH", "MODERATE", "STRONG", "RARE", None)] == [
+        "⚪", "🟡", "🟢", "🟢", "🔥", "⚪",
+    ]

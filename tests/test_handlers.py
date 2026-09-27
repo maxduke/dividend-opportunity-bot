@@ -240,3 +240,112 @@ def test_briefing_button_checks_owner_and_permissions(monkeypatch, owner, whitel
         assert '已开启' in query.message.reply_text.await_args.args[0]
     else:
         query.message.reply_text.assert_not_awaited()
+
+
+def _command_update(text, edited=False):
+    from telegram import Chat, Message, MessageEntity, Update, User
+
+    message = Message(
+        message_id=1,
+        date=datetime(2026, 9, 28, tzinfo=ZoneInfo("Asia/Shanghai")),
+        chat=Chat(id=9, type="private"),
+        from_user=User(id=9, first_name="u", is_bot=False),
+        text=text,
+        entities=[MessageEntity(MessageEntity.BOT_COMMAND, 0, len(text.split()[0]))],
+    )
+    message.set_bot(SimpleNamespace(username="dividend_bot"))
+    return Update(1, edited_message=message) if edited else Update(1, message=message)
+
+
+def test_commands_ignore_edited_messages():
+    from src.main import _command
+
+    handler = _command("opcheck", AsyncMock())
+
+    assert handler.check_update(_command_update("/opcheck 1"))
+    assert not handler.check_update(_command_update("/opcheck 1", edited=True))
+
+
+@pytest.mark.parametrize("args", [[], ["1", "2"], ["0"], ["-3"], ["x"], [str(2**63)]])
+def test_positive_id_rejects_invalid_or_unbindable_values(args):
+    from src.handlers import _positive_id
+
+    with pytest.raises(ValueError):
+        _positive_id(args)
+
+
+@pytest.mark.parametrize("command", ["/opon", "/opoff"])
+def test_toggle_rejects_oversized_id_before_database(monkeypatch, command):
+    from src import handlers
+
+    reply = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=9),
+        message=SimpleNamespace(reply_text=reply, text=f"{command} {2**64}"),
+    )
+    db = Mock(side_effect=AssertionError("invalid ID must not reach SQLite"))
+    monkeypatch.setattr(handlers, "db_execute", db)
+
+    asyncio.run(handlers.toggle_opportunity_rule_command.__wrapped__(
+        update, SimpleNamespace(args=[str(2**64)], bot_data={})
+    ))
+
+    assert reply.await_args.args[0] == f"正确格式：{command} <规则 ID>"
+
+
+@pytest.mark.parametrize("command", ["add_whitelist_command", "del_whitelist_command"])
+def test_whitelist_commands_validate_user_id(monkeypatch, command):
+    from src import handlers
+
+    reply = AsyncMock()
+    update = SimpleNamespace(message=SimpleNamespace(reply_text=reply))
+    monkeypatch.setattr(handlers, "add_to_whitelist", Mock(side_effect=AssertionError))
+    monkeypatch.setattr(handlers, "remove_from_whitelist", Mock(side_effect=AssertionError))
+
+    asyncio.run(getattr(handlers, command).__wrapped__(
+        update, SimpleNamespace(args=[str(2**64)], bot_data={})
+    ))
+
+    assert "命令格式错误" in reply.await_args.args[0]
+
+
+def test_addop_rejects_non_ascii_digit_codes_before_network(monkeypatch):
+    from src import handlers
+
+    reply = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=9),
+        message=SimpleNamespace(reply_text=reply),
+    )
+    monkeypatch.setattr(
+        handlers, "_fetch_single_realtime_quote",
+        AsyncMock(side_effect=AssertionError("must validate first")),
+    )
+    monkeypatch.setattr(handlers, "db_execute", Mock(return_value=None))
+
+    asyncio.run(handlers._add_opportunity_rule(update, SimpleNamespace(bot_data={}), ("510300", "٠٠٠٩٢٢")))
+
+    assert "6 位数字" in reply.await_args.args[0]
+
+
+def test_addop_internal_value_error_is_not_reported_as_bad_score(monkeypatch):
+    from src import handlers
+    from src.data_fetcher import RealtimeQuote
+
+    reply = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=9),
+        message=SimpleNamespace(reply_text=AsyncMock(return_value=SimpleNamespace(edit_text=reply))),
+    )
+    monkeypatch.setattr(handlers, "db_execute", Mock(return_value=None))
+    monkeypatch.setattr(
+        handlers, "_fetch_single_realtime_quote", AsyncMock(return_value=RealtimeQuote(1.0))
+    )
+    monkeypatch.setattr(
+        handlers, "get_cached_valuation",
+        AsyncMock(side_effect=ValueError("provider parse failure")),
+    )
+
+    asyncio.run(handlers._add_opportunity_rule(update, SimpleNamespace(bot_data={}), ("510300", "000922", "60")))
+
+    assert reply.await_args.args[0] == "添加红利机会监控规则时发生内部错误。"

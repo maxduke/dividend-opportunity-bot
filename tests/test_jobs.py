@@ -418,3 +418,44 @@ def test_monitor_uses_persisted_daily_high_for_upgrade_deduplication(monkeypatch
     asyncio.run(jobs._evaluate_opportunity_rules(context, [rule], {'510300': object()}, {}, now))
     send.assert_awaited_once()
     conn.close()
+
+
+def test_calendar_outage_alerts_admin_once_per_weekday(monkeypatch):
+    from src import jobs
+
+    covered = Mock(return_value=False)
+    monkeypatch.setattr(jobs, "calendar_covers", covered)
+    monkeypatch.setattr(jobs, "ADMIN_USER_ID", 1)
+    send_message = AsyncMock()
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+    friday = datetime.fromisoformat("2026-10-09T14:50:00+08:00")
+
+    async def exercise():
+        await jobs._warn_if_calendar_unavailable(context, friday)
+        await jobs._warn_if_calendar_unavailable(context, friday + timedelta(minutes=1))
+        await jobs._warn_if_calendar_unavailable(context, friday + timedelta(days=1))  # Saturday
+
+    asyncio.run(exercise())
+
+    send_message.assert_awaited_once()
+    assert send_message.await_args.kwargs["chat_id"] == 1
+    assert "2026-10-09" in send_message.await_args.kwargs["text"]
+
+    covered.return_value = True
+    asyncio.run(jobs._warn_if_calendar_unavailable(context, friday + timedelta(days=3)))
+    send_message.assert_awaited_once()
+
+
+def test_briefing_reports_calendar_outage_and_still_skips(monkeypatch):
+    from src import jobs
+
+    warn = AsyncMock()
+    rules = Mock(side_effect=AssertionError("unknown session must not run the briefing"))
+    monkeypatch.setattr(jobs, "ensure_trade_days_loaded", AsyncMock())
+    monkeypatch.setattr(jobs, "_warn_if_calendar_unavailable", warn)
+    monkeypatch.setattr(jobs, "is_trading_day", lambda now: False)
+    monkeypatch.setattr(jobs, "db_execute", rules)
+
+    asyncio.run(jobs.daily_briefing_job(SimpleNamespace(bot_data={})))
+
+    warn.assert_awaited_once()

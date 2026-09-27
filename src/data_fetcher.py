@@ -145,7 +145,7 @@ def _quote_from_value(quote) -> Optional[RealtimeQuote]:
 
 
 def _is_trading_day(now: datetime) -> bool:
-    """Use the existing XSHG calendar, with a safe weekday fallback on failure."""
+    """Use the existing XSHG calendar; a calendar failure means no session."""
     try:
         return bool(is_trading_day(now))
     except Exception as exc:
@@ -710,18 +710,18 @@ async def _fetch_all_realtime_quotes(
                     for offset in range(0, len(pending_items), 50):
                         batch = dict(pending_items[offset:offset + 50])
                         details = "\n".join(
-                            f"- `{code}`：连续失败 {count} 次"
+                            f"- <code>{code}</code>：连续失败 {count} 次"
                             for code, count in batch.items()
                         )
                         admin_message = (
-                            "🚨 **机器人警报** 🚨\n\n"
+                            "🚨 <b>机器人警报</b> 🚨\n\n"
                             "以下资产连续获取报价失败已达到阈值：\n"
                             f"{details}\n\n请检查行情接口连通性。"
                         )
                         await context.bot.send_message(
                             chat_id=ADMIN_USER_ID,
                             text=admin_message,
-                            parse_mode=ParseMode.MARKDOWN,
+                            parse_mode=ParseMode.HTML,
                         )
                         for code, count in batch.items():
                             if failure_counts.get(code, 0) >= count:

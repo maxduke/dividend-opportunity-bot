@@ -114,6 +114,20 @@ def is_trading_day(check_date: datetime) -> bool:
     return isinstance(trade_days, set) and cn_date in trade_days
 
 
+def calendar_covers(cn_date: date) -> bool:
+    """Whether the local or loaded provider calendar can classify ``cn_date``.
+
+    Outside coverage ``is_trading_day`` conservatively answers ``False``, which
+    is indistinguishable from a holiday unless callers check this first.
+    """
+    if LOCAL_CALENDAR_COVERAGE_START <= cn_date <= LOCAL_CALENDAR_COVERAGE_END:
+        return True
+    trade_days = _trade_day_cache.get("days")
+    return bool(trade_days) and isinstance(trade_days, set) and (
+        min(trade_days) <= cn_date <= max(trade_days)
+    )
+
+
 def trading_sessions_elapsed(start_date: date, end_date: date) -> int | None:
     """Count XSHG sessions after ``start_date`` through ``end_date``.
 
@@ -136,10 +150,7 @@ def trading_sessions_elapsed(start_date: date, end_date: date) -> int | None:
             is_session = is_trading_day(
                 datetime.combine(cursor, time.min, tzinfo=SHANGHAI_TZ)
             )
-            if not (
-                LOCAL_CALENDAR_COVERAGE_START <= cursor <= LOCAL_CALENDAR_COVERAGE_END
-                or isinstance(_trade_day_cache.get("days"), set)
-            ):
+            if not calendar_covers(cursor):
                 return None
             if is_session:
                 sessions += 1
