@@ -6,7 +6,7 @@ import html
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -19,7 +19,7 @@ from .config import (
     OPPORTUNITY_ALERT_COOLDOWN_MINUTES,
     OPPORTUNITY_LEVEL_LABELS,
     OPPORTUNITY_MAX_ALERTS_PER_DAY,
-    RSI_PERIOD,
+    RSI_LABEL,
     SCORING_MODE_LABELS,
     TECHNICAL_BASIS_LABELS,
     TECHNICAL_HISTORY_DAYS,
@@ -46,6 +46,7 @@ from .metrics import (
     calculate_percentile,
     classify_opportunity_level,
     is_level_upgrade,
+    level_icon,
     score_dividend_bond_spread,
     score_dividend_yield,
     score_drawdown,
@@ -56,6 +57,7 @@ from .metrics import (
 )
 from .utils import split_message
 from .valuation_fetcher import (
+    BondCurve,
     get_bond_history,
     get_cached_cn10y,
     get_cached_valuation,
@@ -140,19 +142,7 @@ def _display_label(labels: dict[str, str], value: str | None) -> str:
     return labels.get(value, value) if value else '暂无'
 
 
-def _match_bond(rows, target_date: date):
-    candidates = []
-    for row in rows:
-        row_date = _date_or_none(row["yield_date"])
-        if row_date is not None and row_date <= target_date:
-            candidates.append((row_date, row))
-    if not candidates:
-        return None
-    row_date, matched = max(candidates, key=lambda item: item[0])
-    return matched if row_date and (target_date - row_date).days <= 7 else None
-
-
-def _history_spreads(valuation_rows, bond_rows, field: str) -> list[tuple[date, float]]:
+def _history_spreads(valuation_rows, bonds: BondCurve, field: str) -> list[tuple[date, float]]:
     field = "dividend_yield1" if field == "股息率1" else "dividend_yield2"
     spreads = []
     for row in valuation_rows:
@@ -160,7 +150,7 @@ def _history_spreads(valuation_rows, bond_rows, field: str) -> list[tuple[date, 
         valuation_date = _date_or_none(row["valuation_date"])
         if value is None or valuation_date is None:
             continue
-        bond = _match_bond(bond_rows, valuation_date)
+        bond = bonds.as_of(valuation_date)
         if bond is not None:
             cn10y = _float_or_none(bond["cn10y"])
             if cn10y is not None:
@@ -372,10 +362,13 @@ async def evaluate_opportunity(
             )
 
         latest_bond = await get_cached_cn10y(bot_data)
-        bond_rows = get_bond_history(end_date=valuation_date)
-        matched_bond = _match_bond(bond_rows, valuation_date)
+        # The earliest valuation in the lookback may match a bond up to 7 days older.
+        bonds = BondCurve(get_bond_history(
+            start_date=cutoff - timedelta(days=7), end_date=valuation_date
+        ))
+        matched_bond = bonds.as_of(valuation_date)
         if matched_bond is None and latest_bond is not None:
-            matched_bond = _match_bond([latest_bond], valuation_date)
+            matched_bond = BondCurve([latest_bond]).as_of(valuation_date)
         if matched_bond is not None:
             cn10y = _float_or_none(matched_bond["cn10y"])
             cn10y_date = matched_bond["yield_date"]
@@ -385,7 +378,7 @@ async def evaluate_opportunity(
         else:
             notes.append("估值日期前 7 个自然日内没有中国十年期国债数据")
 
-        spread_rows = _history_spreads(valuation_rows, bond_rows, CSI_DIVIDEND_YIELD_FIELD)
+        spread_rows = _history_spreads(valuation_rows, bonds, CSI_DIVIDEND_YIELD_FIELD)
         spread_values = [value for _, value in spread_rows]
         spread_observations, spread_span_years, spread_history_complete = _history_maturity(spread_rows)
         if spread_history_complete and spread is not None:
@@ -650,7 +643,7 @@ def should_send_opportunity_alert(
 
 
 def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optional[str] = None) -> str:
-    icon = {"NEUTRAL": "⚪", "WATCH": "🟡", "MODERATE": "🟢", "STRONG": "🟢", "RARE": "🔥"}.get(snapshot.level, "⚪")
+    icon = level_icon(snapshot.level)
     safe_asset = html.escape(snapshot.asset_name)
     safe_benchmark = html.escape(snapshot.benchmark_name)
 
@@ -668,7 +661,7 @@ def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optio
     partial_warning = (
         "⚠️ <b>部分评分</b>\n\n"
         "复权技术历史数据不可用。\n"
-        "本次结果不包含 MA200 / 52 周回撤 / RSI6。\n"
+        f"本次结果不包含 MA200 / 52 周回撤 / {RSI_LABEL}。\n"
         "请勿将其理解为完整的 0–100 红利机会评分。\n\n"
         if snapshot.technical_price_basis == "unavailable"
         else ""
@@ -709,13 +702,13 @@ def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optio
         f"52 周高点：{f(snapshot.high_52w, 3)}\n"
         f"回撤：{f(None if snapshot.drawdown_52w is None else snapshot.drawdown_52w * 100, 2, '%')}\n\n"
         f"⚡ <b>战术</b> {snapshot.tactical_score:.0f} / 20\n\n"
-        f"RSI({RSI_PERIOD})：{f(snapshot.rsi6, 2)}\n\n"
+        f"{RSI_LABEL}：{f(snapshot.rsi6, 2)}\n\n"
         f"🧮 <b>评分明细</b>\n"
         f"股息率：{snapshot.dividend_yield_score:.0f} / 30\n"
         f"股息率—国债利差：{snapshot.spread_score:.0f} / 20\n"
         f"MA200：{score_ma200(snapshot.ma200_deviation):.0f} / 20\n"
         f"52 周回撤：{score_drawdown(snapshot.drawdown_52w):.0f} / 10\n"
-        f"RSI6：{score_rsi(snapshot.rsi6):.0f} / 20\n\n"
+        f"{RSI_LABEL}：{score_rsi(snapshot.rsi6):.0f} / 20\n\n"
         f"总分：<b>{snapshot.total_score:.0f} / 100</b>\n\n"
         f"📅 <b>数据日期</b>\n"
         f"技术价格：{html.escape(snapshot.technical_price_date or '暂无')}\n"
@@ -728,13 +721,24 @@ def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optio
     )
 
 
+def format_metric_lines(snapshot: OpportunitySnapshot) -> list[str]:
+    """Key metrics shared by the compact alert and the daily briefing."""
+    def f(value, digits, suffix="", scale=1):
+        return "暂无" if value is None else f"{float(value) * scale:.{digits}f}{suffix}"
+
+    return [
+        f"股息率：{f(snapshot.dividend_yield_used, 2, '%')}",
+        f"股息率—国债利差：{f(snapshot.dividend_bond_spread, 2, ' 个百分点')}",
+        f"MA200 偏离度：{f(snapshot.ma200_deviation, 1, '%', 100)}",
+        f"52 周回撤：{f(snapshot.drawdown_52w, 1, '%', 100)}",
+        f"{RSI_LABEL}：{f(snapshot.rsi6, 1)}",
+    ]
+
+
 def format_opportunity_alert(snapshot: OpportunitySnapshot, reason: Optional[str] = None) -> str:
     """Compact automatic alert; full audit remains available via /opcheck."""
-    icon = {"NEUTRAL": "⚪", "WATCH": "🟡", "MODERATE": "🟢", "STRONG": "🟢", "RARE": "🔥"}.get(snapshot.level, "⚪")
-
-    def f(value, digits=2, suffix=""):
-        return "暂无" if value is None else f"{float(value):.{digits}f}{suffix}"
-
+    icon = level_icon(snapshot.level)
+    metrics = "\n".join(format_metric_lines(snapshot))
     trigger = {
         "threshold-crossing": "分数跨过告警阈值",
         "level-upgrade": "机会等级升级",
@@ -743,19 +747,15 @@ def format_opportunity_alert(snapshot: OpportunitySnapshot, reason: Optional[str
         f"{icon} <b>红利机会 · {_display_label(OPPORTUNITY_LEVEL_LABELS, snapshot.level)}</b> — <b>{snapshot.total_score:.0f}/100</b>\n\n"
         f"{html.escape(snapshot.asset_name)} (<code>{html.escape(snapshot.asset_code)}</code>)\n"
         f"估值基准：{html.escape(snapshot.benchmark_name)}\n\n"
-        f"估值           {snapshot.valuation_score:.0f}/50\n"
-        f"长期           {snapshot.long_term_score:.0f}/30\n"
-        f"战术           {snapshot.tactical_score:.0f}/20\n\n"
-        f"股息率         {f(snapshot.dividend_yield_used, 2, '%')}\n"
-        f"股息率—国债   {f(snapshot.dividend_bond_spread, 2, '个百分点')}\n"
-        f"MA200          {f(None if snapshot.ma200_deviation is None else snapshot.ma200_deviation * 100, 1, '%')}\n"
-        f"52 周回撤      {f(None if snapshot.drawdown_52w is None else snapshot.drawdown_52w * 100, 1, '%')}\n"
-        f"RSI{RSI_PERIOD}            {f(snapshot.rsi6, 1)}\n\n"
-        f"估值日期       {html.escape(snapshot.valuation_date or '暂无')}\n"
-        f"国债日期       {html.escape(snapshot.cn10y_date or '暂无')}\n"
-        f"价格日期       {html.escape(snapshot.technical_price_date or '暂无')}\n\n"
-        f"模式           <code>{html.escape(_display_label(SCORING_MODE_LABELS, snapshot.scoring_mode))}</code>\n"
-        f"数据           <code>{html.escape(_display_label(DATA_QUALITY_LABELS, snapshot.data_quality))}</code>\n\n"
+        f"估值：{snapshot.valuation_score:.0f}/50\n"
+        f"长期：{snapshot.long_term_score:.0f}/30\n"
+        f"战术：{snapshot.tactical_score:.0f}/20\n\n"
+        f"{metrics}\n\n"
+        f"估值日期：{html.escape(snapshot.valuation_date or '暂无')}\n"
+        f"国债日期：{html.escape(snapshot.cn10y_date or '暂无')}\n"
+        f"价格日期：{html.escape(snapshot.technical_price_date or '暂无')}\n\n"
+        f"模式：<code>{html.escape(_display_label(SCORING_MODE_LABELS, snapshot.scoring_mode))}</code>\n"
+        f"数据：<code>{html.escape(_display_label(DATA_QUALITY_LABELS, snapshot.data_quality))}</code>\n\n"
         f"触发原因：{html.escape(trigger)}\n"
         f"使用 /opcheck {snapshot.rule_id} 查看完整详情。"
     )
