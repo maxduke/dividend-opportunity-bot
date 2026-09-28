@@ -404,6 +404,7 @@ def test_monitor_uses_persisted_daily_high_for_upgrade_deduplication(monkeypatch
         total_score=77, level='STRONG', technical_price_basis='qfq_realtime')
     rule = dict(id=1, user_id=9, asset_code='510300', min_score=60,
         last_score=69, last_level='MODERATE', last_alert_level='MODERATE',
+        last_monitor_score=69, last_monitor_level='MODERATE',
         last_alert_at='2026-08-24T11:00:00+08:00')
     monkeypatch.setattr(jobs, 'evaluate_opportunity', AsyncMock(return_value=snapshot))
     send = AsyncMock(return_value=True)

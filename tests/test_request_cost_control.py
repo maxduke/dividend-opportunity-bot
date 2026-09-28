@@ -172,7 +172,7 @@ def _history_frame(*, basis, asof, rows=369):
         {
             "收盘": [100.0] * rows,
         },
-        index=pd.date_range("2025-01-01", periods=rows),
+        index=pd.bdate_range(end="2026-08-21", periods=rows),
     )
     frame.attrs.update(
         technical_history_days=550,
@@ -649,3 +649,18 @@ def test_failed_bond_refresh_retries_after_failure_cooldown(monkeypatch):
     )
     assert asyncio.run(valuation_fetcher.get_cached_cn10y(bot_data)) is None
     assert fetch.await_count == 2
+
+
+def test_name_provider_exception_retries_then_uses_code(monkeypatch):
+    from src import data_fetcher
+    monkeypatch.setattr(data_fetcher, 'ENABLE_AKSHARE_PROXY_PATCH', False)
+    monkeypatch.setattr(data_fetcher, 'REQUEST_INTERVAL_SECONDS', 0)
+    monkeypatch.setattr(data_fetcher, 'FETCH_RETRY_DELAY_SECONDS', 0)
+    monkeypatch.setattr(data_fetcher, 'FETCH_RETRY_ATTEMPTS', 2)
+    provider = AsyncMock(side_effect=ConnectionError('name unavailable'))
+    monkeypatch.setattr(data_fetcher, '_call_akshare', provider)
+    context = SimpleNamespace(bot_data={})
+    assert asyncio.run(data_fetcher.get_asset_name_with_cache('515180', context)) == '资产_515180'
+    assert provider.await_count == 2
+    assert asyncio.run(data_fetcher.get_asset_name_with_cache('515180', context)) == '资产_515180'
+    assert provider.await_count == 2

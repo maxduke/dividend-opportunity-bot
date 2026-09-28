@@ -6,6 +6,7 @@ from src import market
 
 
 async def _run_inline(function, *args, **kwargs):
+    kwargs.pop('timeout', None)
     return function(*args, **kwargs)
 
 
@@ -93,7 +94,7 @@ def test_async_calendar_preload_is_single_flight(monkeypatch):
     monkeypatch.setattr(market, "_trade_day_refresh_task", None)
     monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
 
-    monkeypatch.setattr(asyncio, "to_thread", _run_inline)
+    monkeypatch.setattr(market, "run_provider_call", _run_inline)
 
     async def check():
         await asyncio.gather(
@@ -119,7 +120,7 @@ def test_async_calendar_preload_loads_out_of_range_weekend(monkeypatch):
     monkeypatch.setattr(market, "_trade_day_refresh_task", None)
     monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
 
-    monkeypatch.setattr(asyncio, "to_thread", _run_inline)
+    monkeypatch.setattr(market, "run_provider_call", _run_inline)
 
     asyncio.run(market.ensure_trade_days_loaded(check_date))
 
@@ -139,7 +140,7 @@ def test_timed_out_calendar_preload_reuses_in_flight_task(monkeypatch):
         await release.wait()
         return {check_date.date()}
 
-    monkeypatch.setattr(asyncio, "to_thread", blocked_call)
+    monkeypatch.setattr(market, "run_provider_call", blocked_call)
     monkeypatch.setattr(market, "AKSHARE_CALL_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(
         market,

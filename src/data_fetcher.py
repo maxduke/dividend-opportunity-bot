@@ -3,10 +3,8 @@
 import asyncio
 import logging
 import math
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from functools import partial
 from typing import Dict, List, Optional, Tuple, Union
 from zoneinfo import ZoneInfo
 
@@ -37,7 +35,8 @@ from .config import (
     STOCK_PREFIXES,
     TECHNICAL_HISTORY_DAYS,
 )
-from .market import is_trading_day
+from .market import is_trading_day, trading_sessions_elapsed
+from .provider_calls import run_provider_call
 from .proxy_health import (
     POSITIVE,
     check_proxy_balance_async,
@@ -49,9 +48,6 @@ from .utils import get_sina_symbol, normalize_hist_df
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 MAX_REALTIME_QUOTE_AGE = timedelta(minutes=5)
-# ponytail: bound abandoned provider threads; use subprocess isolation if calls
-# can hang permanently in production.
-_AKSHARE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="akshare")
 
 
 @dataclass(frozen=True)
@@ -194,6 +190,11 @@ def build_indicator_close_series(
     else:
         latest_date = latest_index.date()
     latest_price = float(closes.iloc[-1])
+    if not history_dates_are_current(hist_df, current):
+        return IndicatorPriceSeries(
+            pd.Series(dtype=float), latest_price, latest_date, False, True,
+            "历史行情日期过期、无效或交易日历不可用，已停用技术评分",
+        )
     quote_obj = _quote_from_value(quote)
     trading_today = _is_trading_day(current)
     quote_time = _to_shanghai_datetime(quote_obj.timestamp) if quote_obj else None
@@ -297,17 +298,12 @@ async def _run_with_retries(operation, description: str, attempts: int = None):
 
 
 async def _call_akshare(function, *args, timeout_seconds=None, **kwargs):
-    """Run a blocking provider call without blocking the bot event loop.
-
-    ``wait_for`` limits how long the application waits; it cannot forcibly
-    terminate an already-running Python worker thread.
-    """
+    """Terminate and reap isolated provider calls on timeout or cancellation."""
     timeout = AKSHARE_CALL_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     try:
-        loop = asyncio.get_running_loop()
-        return await asyncio.wait_for(
-            loop.run_in_executor(_AKSHARE_EXECUTOR, partial(function, *args, **kwargs)),
-            timeout=timeout,
+        return await run_provider_call(
+            function, *args, timeout=timeout,
+            proxy_active=proxy_patch_active(), **kwargs,
         )
     except asyncio.TimeoutError:
         logger.warning(
@@ -338,6 +334,31 @@ def history_is_sufficient(frame, days: int) -> bool:
     return _valid_close_count(frame) >= minimum
 
 
+def history_dates_are_current(frame, now) -> bool:
+    """Require history through the previous session before appending today's quote.
+
+    Today's bar may be incomplete or unpublished even just after the close.
+    Fetch time alone never establishes the freshness of the returned bars.
+    """
+    try:
+        if frame is None or frame.empty or "收盘" not in frame:
+            return False
+        index = pd.DatetimeIndex(pd.to_datetime(frame.index))
+        if index.hasnans or index.has_duplicates:
+            return False
+        if index.tz is not None:
+            index = index.tz_convert(SHANGHAI_TZ)
+        latest = index.max().date()
+        today = now.date() if isinstance(now, datetime) else now
+        if latest > today:
+            return False
+        if latest == today:
+            return True
+        return trading_sessions_elapsed(latest, today - timedelta(days=1)) == 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def runtime_history_is_usable(frame, days: int, now=None) -> bool:
     """Return whether a frame is current qfq history suitable for runtime scoring."""
     if frame is None or getattr(frame, "empty", True):
@@ -358,6 +379,7 @@ def runtime_history_is_usable(frame, days: int, now=None) -> bool:
         and history_is_sufficient(frame, days)
         and frame.attrs.get("price_basis") == PRICE_ADJUSTMENT == "qfq"
         and basis_asof == current_date
+        and history_dates_are_current(frame, current_date)
     )
 
 
@@ -440,8 +462,15 @@ async def get_asset_name_with_cache(asset_code: str, context: ContextTypes.DEFAU
                     return match.iloc[0]
         return None
 
+    async def safe_fetch_name():
+        try:
+            return await fetch_name()
+        except Exception as exc:
+            logger.warning("获取资产名称失败(%s) error_type=%s", asset_code, type(exc).__name__)
+            return None
+
     name = await _run_with_retries(
-        fetch_name,
+        safe_fetch_name,
         f"获取资产名称({asset_code})",
         attempts=_em_retry_attempts(),
     )

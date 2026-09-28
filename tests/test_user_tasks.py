@@ -264,38 +264,30 @@ def test_cancel_button_rejects_other_user_and_stale_token(rules_db):
     asyncio.run(exercise())
 
 
-def test_cancelled_provider_wait_drops_result_after_thread_finishes(rules_db, monkeypatch):
-    import threading
+def test_cancelled_provider_process_cannot_publish_result(rules_db, monkeypatch, tmp_path):
     from src.data_fetcher import _call_akshare
+    from tests.provider_stub import hang
+    from tests.test_provider_timeout import assert_reaped
+
+    monkeypatch.setattr('src.data_fetcher.proxy_patch_active', lambda: False)
+    marker = tmp_path / 'pid'
 
     async def exercise():
-        loop = asyncio.get_running_loop()
-        entered = asyncio.Event()
-        finished = asyncio.Event()
-        release = threading.Event()
         consumed = []
 
-        def provider():
-            loop.call_soon_threadsafe(entered.set)
-            release.wait(2)
-            loop.call_soon_threadsafe(finished.set)
-            return 'late-result'
-
         async def operation(work):
-            result = await _call_akshare(provider)
+            result = await _call_akshare(hang, str(marker))
             work.check()
             consumed.append(result)
         manager = user_tasks.UserTaskManager()
         work = await manager.submit(9, message(), '数据查询', operation)
-        try:
-            await asyncio.wait_for(entered.wait(), 1)
-            manager.cancel(9)
-            await asyncio.wait_for(work.task, 1)
-            assert work.state == '已取消' and not consumed
-        finally:
-            release.set()
-            await asyncio.wait_for(finished.wait(), 1)
-        assert not consumed
+        async with asyncio.timeout(3):
+            while not marker.exists():
+                await asyncio.sleep(.01)
+        manager.cancel(9)
+        await asyncio.wait_for(work.task, 2)
+        assert work.state == '已取消' and not consumed
+        assert_reaped(marker)
     asyncio.run(exercise())
 
 
