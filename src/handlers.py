@@ -4,6 +4,7 @@
 
 import asyncio
 import logging
+import re
 import sqlite3
 from datetime import datetime
 from functools import wraps
@@ -61,6 +62,19 @@ from .user_tasks import AccessRevoked, task_manager
 
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+_CODE_RE = re.compile(r"[0-9]{6}")
+_ID_RE = re.compile(r"[0-9]+")
+_MAX_SQLITE_INTEGER = 2**63 - 1
+
+
+def _positive_id(args) -> int:
+    """Parse exactly one positive ASCII ID that SQLite can bind; raise ValueError otherwise."""
+    if len(args) != 1 or not _ID_RE.fullmatch(args[0]):
+        raise ValueError("expected exactly one ASCII ID")
+    value = int(args[0])
+    if not 0 < value <= _MAX_SQLITE_INTEGER:
+        raise ValueError("ID out of range")
+    return value
 
 
 def _briefing_times():
@@ -182,7 +196,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /proxy_status [refresh] - 查看 AKShare Proxy 状态
 
 <b>全局配置：</b>
-- RSI6 周期（红利机会战术因子）：<b>{RSI_PERIOD}</b>
+- RSI 周期（红利机会战术因子）：<b>{RSI_PERIOD}</b>
 - 技术价格: <b>{PRICE_ADJUSTMENT}</b>
 - 请求间隔: <b>{REQUEST_INTERVAL_SECONDS}秒</b>
 - 每日简报: <b>{BRIEFING_TIMES_STR}</b>
@@ -222,16 +236,15 @@ async def _add_opportunity_rule(update, context, args, work=None):
             return
         asset_code, benchmark_code = args[:2]
         benchmark_code = benchmark_code.upper()
-        min_score = float(args[2]) if len(args) == 3 else OPPORTUNITY_ALERT_THRESHOLD
+        try:
+            min_score = float(args[2]) if len(args) == 3 else OPPORTUNITY_ALERT_THRESHOLD
+        except ValueError:
+            await report("最低评分必须是数字。")
+            return
         if not 0 <= min_score <= 100:
             await report("最低评分必须在 0 到 100 之间。")
             return
-        if not (
-            asset_code.isdigit()
-            and benchmark_code.isdigit()
-            and len(asset_code) == 6
-            and len(benchmark_code) == 6
-        ):
+        if not (_CODE_RE.fullmatch(asset_code) and _CODE_RE.fullmatch(benchmark_code)):
             await report("资产代码和估值基准代码必须是 6 位数字。")
             return
         if asset_code[0] not in STOCK_PREFIXES + ETF_PREFIXES:
@@ -352,8 +365,6 @@ async def _add_opportunity_rule(update, context, args, work=None):
         )
     except AccessRevoked:
         raise
-    except ValueError:
-        await report("最低评分必须是数字。")
     except Exception as exc:
         logger.exception("添加 Opportunity Rule 失败: %s", exc)
         if created_rule_id is not None and not creation_complete:
@@ -381,11 +392,7 @@ async def check_opportunity_command(update: Update, context: ContextTypes.DEFAUL
     user_id = update.effective_user.id
     if context.args:
         try:
-            if len(context.args) != 1:
-                raise ValueError
-            rule_id = int(context.args[0])
-            if not 0 < rule_id <= 2**63 - 1:
-                raise ValueError
+            rule_id = _positive_id(context.args)
         except ValueError:
             await update.message.reply_text("正确格式：/opcheck [规则 ID]")
             return
@@ -404,20 +411,20 @@ async def check_opportunity_command(update: Update, context: ContextTypes.DEFAUL
 
 @whitelisted_only
 async def threshold_opportunity_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from .rule_ui import set_threshold
+    from .rule_ui import parse_threshold, set_threshold
 
     try:
         if len(context.args) != 2:
             raise ValueError
-        rule_id = int(context.args[0])
-        if not 0 < rule_id <= 2**63 - 1:
-            raise ValueError
-        updated = set_threshold(update.effective_user.id, rule_id, context.args[1])
+        rule_id = _positive_id(context.args[:1])
+        score = parse_threshold(context.args[1])
     except ValueError:
         await update.message.reply_text("正确格式：/opthreshold <规则 ID> <0–100 的分数>")
         return
+    # Only argument parsing maps to the format hint; storage errors reach the error handler.
+    updated = set_threshold(update.effective_user.id, rule_id, score)
     await update.message.reply_text(
-        f"✅ 规则 {rule_id} 告警阈值已更新为 {float(context.args[1]):g}。监控状态和历史记录已保留。"
+        f"✅ 规则 {rule_id} 告警阈值已更新为 {score:g}。监控状态和历史记录已保留。"
         if updated else "未找到该规则，或规则不属于您。"
     )
 
@@ -427,12 +434,8 @@ async def delete_opportunity_rule_command(update: Update, context: ContextTypes.
     from .rule_ui import delete_confirmation, owned_rule
 
     try:
-        if len(context.args) != 1:
-            raise ValueError
-        rule_id = int(context.args[0])
-        if not 0 < rule_id <= 2**63 - 1:
-            raise ValueError
-    except (ValueError, IndexError):
+        rule_id = _positive_id(context.args)
+    except ValueError:
         await update.message.reply_text("正确格式：/delop <规则 ID>")
         return
     rule = owned_rule(update.effective_user.id, rule_id)
@@ -447,8 +450,8 @@ async def delete_opportunity_rule_command(update: Update, context: ContextTypes.
 async def toggle_opportunity_rule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     command = update.message.text.split()[0].lower().split("@", 1)[0]
     try:
-        rule_id = int(context.args[0])
-    except (ValueError, IndexError):
+        rule_id = _positive_id(context.args)
+    except ValueError:
         await update.message.reply_text(f"正确格式：{command} <规则 ID>")
         return
     rule = db_execute(
@@ -556,27 +559,27 @@ async def briefing_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def add_whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        _, user_id_str = update.message.text.split()
-        user_id = int(user_id_str)
-        add_to_whitelist(user_id)
-        await update.message.reply_text(f"✅ 用户 {user_id} 已添加到白名单。")
-    except (ValueError, IndexError):
+        user_id = _positive_id(context.args)
+    except ValueError:
         await update.message.reply_text("命令格式错误。\n正确格式：/add_w <用户 ID>")
+        return
+    add_to_whitelist(user_id)
+    await update.message.reply_text(f"✅ 用户 {user_id} 已添加到白名单。")
 
 
 @admin_only
 async def del_whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        _, user_id_str = update.message.text.split()
-        user_id = int(user_id_str)
-        if user_id == ADMIN_USER_ID:
-            await update.message.reply_text("❌ 不能将管理员从白名单中删除。")
-            return
-        remove_from_whitelist(user_id)
-        task_manager(context).cancel(user_id)
-        await update.message.reply_text(f"✅ 用户 {user_id} 已从白名单中移除。")
-    except (ValueError, IndexError):
+        user_id = _positive_id(context.args)
+    except ValueError:
         await update.message.reply_text("命令格式错误。\n正确格式：/del_w <用户 ID>")
+        return
+    if user_id == ADMIN_USER_ID:
+        await update.message.reply_text("❌ 不能将管理员从白名单中删除。")
+        return
+    remove_from_whitelist(user_id)
+    task_manager(context).cancel(user_id)
+    await update.message.reply_text(f"✅ 用户 {user_id} 已从白名单中移除。")
 
 
 @admin_only

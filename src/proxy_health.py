@@ -216,12 +216,12 @@ def next_balance_retry_at(status: ProxyBalanceStatus | None = None) -> datetime 
     return status.checked_at + timedelta(minutes=minutes)
 
 
-STARTUP_NO_BALANCE_MESSAGE = """⚠️ AKShare Proxy 不可用
+STARTUP_NO_BALANCE_MESSAGE = f"""⚠️ AKShare Proxy 不可用
 
 检测到 akshare-proxy-patch 已配置，但当前积分不足或 Token 无效。
 
 ETF 前复权历史数据可能无法获取，
-MA200 / 52周回撤 / RSI6 将在必要时自动降级关闭。
+MA200 / 52周回撤 / {config.RSI_LABEL} 将在必要时自动降级关闭。
 
 请检查：
 https://ak.cheapproxy.net

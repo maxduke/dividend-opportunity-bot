@@ -419,3 +419,101 @@ def test_monitor_uses_persisted_daily_high_for_upgrade_deduplication(monkeypatch
     asyncio.run(jobs._evaluate_opportunity_rules(context, [rule], {'510300': object()}, {}, now))
     send.assert_awaited_once()
     conn.close()
+
+
+def test_calendar_outage_alerts_admin_once_per_weekday(monkeypatch):
+    from src import jobs
+
+    covered = Mock(return_value=False)
+    monkeypatch.setattr(jobs, "calendar_covers", covered)
+    monkeypatch.setattr(jobs, "ADMIN_USER_ID", 1)
+    send_message = AsyncMock()
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+    friday = datetime.fromisoformat("2026-10-09T14:50:00+08:00")
+
+    async def exercise():
+        await jobs._warn_if_calendar_unavailable(context, friday)
+        await jobs._warn_if_calendar_unavailable(context, friday + timedelta(minutes=1))
+        await jobs._warn_if_calendar_unavailable(context, friday + timedelta(days=1))  # Saturday
+
+    asyncio.run(exercise())
+
+    send_message.assert_awaited_once()
+    assert send_message.await_args.kwargs["chat_id"] == 1
+    assert "2026-10-09" in send_message.await_args.kwargs["text"]
+
+    covered.return_value = True
+    asyncio.run(jobs._warn_if_calendar_unavailable(context, friday + timedelta(days=3)))
+    send_message.assert_awaited_once()
+
+
+def test_briefing_reports_calendar_outage_and_still_skips(monkeypatch):
+    from src import jobs
+
+    warn = AsyncMock()
+    rules = Mock(side_effect=AssertionError("unknown session must not run the briefing"))
+    monkeypatch.setattr(jobs, "ensure_trade_days_loaded", AsyncMock())
+    monkeypatch.setattr(jobs, "_warn_if_calendar_unavailable", warn)
+    monkeypatch.setattr(jobs, "is_trading_day", lambda now: False)
+    monkeypatch.setattr(jobs, "db_execute", rules)
+
+    asyncio.run(jobs.daily_briefing_job(SimpleNamespace(bot_data={})))
+
+    warn.assert_awaited_once()
+
+
+def test_calendar_alert_waits_for_grace_and_retries_failed_send(monkeypatch):
+    from src import jobs
+
+    monkeypatch.setattr(jobs, "calendar_covers", lambda day: False)
+    monkeypatch.setattr(jobs, "ADMIN_USER_ID", 1)
+    send_message = AsyncMock(side_effect=[RuntimeError("telegram down"), None])
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+    start = datetime.fromisoformat("2026-10-09T09:31:00+08:00")
+    grace = jobs.CALENDAR_ALERT_GRACE
+
+    async def exercise():
+        await jobs._warn_if_calendar_unavailable(context, start, grace=grace)
+        assert send_message.await_count == 0  # a single startup failure stays quiet
+        await jobs._warn_if_calendar_unavailable(context, start + grace, grace=grace)
+        await jobs._warn_if_calendar_unavailable(context, start + grace * 2, grace=grace)
+        await jobs._warn_if_calendar_unavailable(context, start + grace * 3, grace=grace)
+
+    asyncio.run(exercise())
+
+    # First send failed and left the day unmarked; the retry succeeded once.
+    assert send_message.await_count == 2
+
+
+def test_calendar_recovery_resets_grace_window(monkeypatch):
+    from src import jobs
+
+    covered = Mock(return_value=False)
+    monkeypatch.setattr(jobs, "calendar_covers", covered)
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()), bot_data={})
+    now = datetime.fromisoformat("2026-10-09T09:31:00+08:00")
+
+    asyncio.run(jobs._warn_if_calendar_unavailable(context, now, grace=jobs.CALENDAR_ALERT_GRACE))
+    covered.return_value = True
+    asyncio.run(jobs._warn_if_calendar_unavailable(context, now, grace=jobs.CALENDAR_ALERT_GRACE))
+
+    assert jobs.CALENDAR_UNKNOWN_SINCE_KEY not in context.bot_data
+
+
+def test_intraday_job_checks_calendar_only_during_session_time(monkeypatch):
+    from src import jobs
+
+    warn = AsyncMock()
+    monkeypatch.setattr(jobs, "ENABLE_INTRADAY_MONITOR", True)
+    monkeypatch.setattr(jobs, "ensure_trade_days_loaded", AsyncMock())
+    monkeypatch.setattr(jobs, "_warn_if_calendar_unavailable", warn)
+    monkeypatch.setattr(jobs, "is_market_hours", lambda: False)
+    session = Mock(return_value=False)
+    monkeypatch.setattr(jobs, "is_session_time", session)
+
+    asyncio.run(jobs._check_opportunity_job(SimpleNamespace(bot_data={})))
+    warn.assert_not_awaited()
+
+    session.return_value = True
+    asyncio.run(jobs._check_opportunity_job(SimpleNamespace(bot_data={})))
+    assert warn.await_args.kwargs == {"grace": jobs.CALENDAR_ALERT_GRACE}

@@ -196,6 +196,10 @@ def is_level_upgrade(previous: Optional[str], current: Optional[str]) -> bool:
     return level_rank(current) > level_rank(previous)
 
 
+def level_icon(level: Optional[str]) -> str:
+    return {name: icon for _, name, icon in OPPORTUNITY_LEVELS}.get(level or "NEUTRAL", "⚪")
+
+
 def total_score(*scores: Optional[float]) -> float:
     values = []
     for score in scores:
