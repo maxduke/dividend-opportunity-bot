@@ -565,10 +565,33 @@ def save_opportunity_snapshot(
     )
 
 
-def record_rule_evaluation(rule_id: int, snapshot: OpportunitySnapshot, now: Optional[datetime] = None) -> None:
+def record_rule_evaluation(
+    rule_id: int,
+    snapshot: OpportunitySnapshot,
+    now: Optional[datetime] = None,
+    *,
+    monitor: bool = False,
+) -> None:
+    """Record the latest display result; only monitor runs advance the alert baseline.
+
+    The observation timestamp guards against a slow, older manual or briefing
+    evaluation overwriting a newer result shown on the rule card.
+    """
+    observed_at = snapshot.snapshot_at
+    display_is_newer = "last_observed_at IS NULL OR last_observed_at <= ?"
+    monitor_columns = (
+        "last_monitor_score = ?, last_monitor_level = ?, " if monitor else ""
+    )
+    monitor_params = (snapshot.total_score, snapshot.level) if monitor else ()
     db_execute(
-        "UPDATE opportunity_rules SET last_score = ?, last_level = ?, updated_at = ? WHERE id = ?",
-        (snapshot.total_score, snapshot.level, (now or _now()).isoformat(), rule_id),
+        f"""UPDATE opportunity_rules SET {monitor_columns}
+            last_score = CASE WHEN {display_is_newer} THEN ? ELSE last_score END,
+            last_level = CASE WHEN {display_is_newer} THEN ? ELSE last_level END,
+            last_observed_at = CASE WHEN {display_is_newer} THEN ? ELSE last_observed_at END,
+            updated_at = ? WHERE id = ?""",
+        (*monitor_params, observed_at, snapshot.total_score,
+         observed_at, snapshot.level, observed_at, observed_at,
+         (now or _now()).isoformat(), rule_id),
         swallow_errors=False,
     )
 
@@ -609,8 +632,8 @@ def should_send_opportunity_alert(
     if snapshot.technical_price_basis == "unavailable":
         return False, "technical-data-unavailable"
     threshold = float(rule["min_score"])
-    previous_score = _float_or_none(rule["last_score"])
-    previous_level = rule["last_level"]
+    previous_score = _float_or_none(rule["last_monitor_score"])
+    previous_level = rule["last_monitor_level"]
     if previous_score is None or snapshot.total_score < threshold:
         return False, "below-threshold-or-no-baseline"
     crossed_threshold = previous_score < threshold <= snapshot.total_score

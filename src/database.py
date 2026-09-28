@@ -72,6 +72,9 @@ def db_init():
             revision INTEGER NOT NULL DEFAULT 0,
             last_score REAL,
             last_level TEXT,
+            last_observed_at TEXT,
+            last_monitor_score REAL,
+            last_monitor_level TEXT,
             last_alert_score REAL,
             last_alert_level TEXT,
             last_alert_at TEXT,
@@ -143,9 +146,7 @@ def db_init():
         ON opportunity_snapshots(rule_id, snapshot_at)
         ''')
         _ensure_opportunity_snapshot_schema(cursor)
-        cursor.execute("PRAGMA table_info(opportunity_rules)")
-        if "revision" not in {row[1] for row in cursor.fetchall()}:
-            cursor.execute("ALTER TABLE opportunity_rules ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+        _ensure_opportunity_rule_schema(cursor)
         if ADMIN_USER_ID:
             cursor.execute('INSERT OR IGNORE INTO whitelist (user_id) VALUES (?)', (ADMIN_USER_ID,))
         conn.commit()
@@ -166,6 +167,25 @@ def _ensure_opportunity_snapshot_schema(cursor: sqlite3.Cursor):
     ):
         if column not in existing:
             cursor.execute(f"ALTER TABLE opportunity_snapshots ADD COLUMN {column} {definition}")
+
+
+def _ensure_opportunity_rule_schema(cursor: sqlite3.Cursor):
+    """Keep display observations separate from the automatic monitor baseline."""
+    cursor.execute("PRAGMA table_info(opportunity_rules)")
+    existing = {row[1] for row in cursor.fetchall()}
+    if "revision" not in existing:
+        cursor.execute("ALTER TABLE opportunity_rules ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+    for column, definition in (("last_score", "REAL"), ("last_level", "TEXT")):
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE opportunity_rules ADD COLUMN {column} {definition}")
+    if "last_observed_at" not in existing:
+        cursor.execute("ALTER TABLE opportunity_rules ADD COLUMN last_observed_at TEXT")
+    if "last_monitor_score" not in existing:
+        cursor.execute("ALTER TABLE opportunity_rules ADD COLUMN last_monitor_score REAL")
+        cursor.execute("UPDATE opportunity_rules SET last_monitor_score = last_score")
+    if "last_monitor_level" not in existing:
+        cursor.execute("ALTER TABLE opportunity_rules ADD COLUMN last_monitor_level TEXT")
+        cursor.execute("UPDATE opportunity_rules SET last_monitor_level = last_level")
 
 
 def _rollback(conn):

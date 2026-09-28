@@ -262,7 +262,7 @@ async def _evaluate_opportunity_rules(context, rules, quotes, history, now):
                 continue
             if snapshot_should_persist(rule["id"], snapshot, alert_sent=sent):
                 save_opportunity_snapshot(snapshot, alert_sent=sent)
-            record_rule_evaluation(rule["id"], snapshot, now)
+            record_rule_evaluation(rule["id"], snapshot, now, monitor=True)
             if sent:
                 record_rule_alert(rule["id"], snapshot, now)
                 logger.info("[OPPORTUNITY] 已发送告警 rule=%s reason=%s", rule["id"], reason)

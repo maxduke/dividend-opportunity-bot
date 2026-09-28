@@ -51,6 +51,13 @@ def install_data_provider_patch() -> bool:
             balance.reason,
         )
         return False
+    install_verified_proxy_patch()
+    return True
+
+
+def install_verified_proxy_patch() -> None:
+    """Install in a worker only after the parent has verified and enabled proxy use."""
+    global _installed
     try:
         import akshare_proxy_patch
     except ImportError as exc:
@@ -75,4 +82,3 @@ def install_data_provider_patch() -> bool:
         len(hook_domains),
         AKSHARE_PROXY_RETRY,
     )
-    return True

@@ -10,6 +10,7 @@ import pandas as pd
 import pandas_market_calendars as mcal
 
 from .config import AKSHARE_CALL_TIMEOUT_SECONDS
+from .provider_calls import run_provider_call
 
 CHINA_CALENDAR = mcal.get_calendar("XSHG")
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
@@ -82,7 +83,7 @@ async def ensure_trade_days_loaded(check_date: datetime | None = None) -> None:
             return
         if _trade_day_refresh_task is None:
             _trade_day_refresh_task = asyncio.create_task(
-                asyncio.to_thread(_load_trade_days_from_ak)
+                run_provider_call(_load_trade_days_from_ak, timeout=AKSHARE_CALL_TIMEOUT_SECONDS)
             )
         try:
             trade_days = await asyncio.wait_for(

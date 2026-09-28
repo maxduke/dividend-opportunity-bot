@@ -116,12 +116,14 @@ def test_addop_initial_snapshot_is_critical(monkeypatch):
         },
     )
     db_results = iter([None, {"daily_briefing_enabled": 0}])
-    snapshot = SimpleNamespace(total_score=72, level="STRONG")
+    snapshot = SimpleNamespace(total_score=72, level="STRONG", snapshot_at="2026-08-24T10:00:00+08:00")
     save = Mock()
+    writes = []
 
     def fake_db_execute(query, *args, **kwargs):
         if query.lstrip().startswith("SELECT"):
             return next(db_results)
+        writes.append((query, args[0]))
         return 7 if kwargs.get("return_lastrowid") else None
 
     monkeypatch.setattr(handlers, "db_execute", fake_db_execute)
@@ -141,12 +143,13 @@ def test_addop_initial_snapshot_is_critical(monkeypatch):
     monkeypatch.setattr(handlers, "get_asset_name_with_cache", AsyncMock(return_value="红利ETF"))
     monkeypatch.setattr(handlers, "evaluate_opportunity", AsyncMock(return_value=snapshot))
     monkeypatch.setattr(handlers, "save_opportunity_snapshot", save)
-    monkeypatch.setattr(handlers, "record_rule_evaluation", Mock())
     monkeypatch.setattr(handlers, "is_whitelisted", lambda uid: True)
 
     asyncio.run(handlers._add_opportunity_rule(update, context, tuple(context.args)))
 
     save.assert_called_once_with(snapshot, critical=True)
+    assert "last_monitor_score, last_monitor_level" in writes[0][0]
+    assert writes[0][1][-7:-2] == (72, "STRONG", snapshot.snapshot_at, 72, "STRONG")
     assert "监控已创建" in sent_message.edit_text.await_args.args[0]
     assert "盘中自动告警" in sent_message.edit_text.await_args.args[0]
     assert context.bot_data["quote_failure_counts"] == {}
@@ -181,7 +184,7 @@ def test_opon_evaluates_and_stores_immediate_baseline(monkeypatch):
     )
     context = SimpleNamespace(args=["7"], bot_data={})
     rule = {"id": 7, "is_active": 0}
-    snapshot = SimpleNamespace(total_score=73, level="STRONG")
+    snapshot = SimpleNamespace(total_score=73, level="STRONG", snapshot_at="2026-08-24T10:00:00+08:00")
     db = Mock(return_value=rule)
     evaluate = AsyncMock(return_value=snapshot)
     save = Mock()
@@ -196,8 +199,10 @@ def test_opon_evaluates_and_stores_immediate_baseline(monkeypatch):
     save.assert_called_once_with(snapshot, critical=True)
     assert db.call_count == 1
     assert "SET is_active = 1" in db.call_args_list[0].args[0]
+    assert "last_monitor_score = ?, last_monitor_level = ?" in db.call_args_list[0].args[0]
     assert "last_score = NULL" not in db.call_args_list[0].args[0]
     assert db.call_args_list[0].args[1][:2] == (73, "STRONG")
+    assert db.call_args_list[0].args[1][2:5] == (snapshot.snapshot_at, 73, "STRONG")
 
 
 @pytest.mark.parametrize('intraday,subscribed,times,manual,button', [

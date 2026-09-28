@@ -80,6 +80,38 @@ def test_legacy_database_migration_is_non_destructive(monkeypatch, tmp_path):
     } <= tables
 
 
+def test_existing_opportunity_rule_baseline_is_migrated_once(monkeypatch, tmp_path):
+    from src import database
+
+    db_file = tmp_path / "existing-opportunity.db"
+    with sqlite3.connect(db_file) as conn:
+        conn.execute("""CREATE TABLE opportunity_rules (
+            id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, asset_code TEXT NOT NULL,
+            benchmark_code TEXT NOT NULL, min_score REAL NOT NULL,
+            is_active INTEGER NOT NULL, last_score REAL, last_level TEXT,
+            last_alert_score REAL, last_alert_level TEXT, last_alert_at TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )""")
+        conn.execute("""INSERT INTO opportunity_rules
+            VALUES (1, 9, '510300', '000922', 70, 1, 65, 'MODERATE',
+                    NULL, NULL, NULL, '2026-08-24', '2026-08-24')""")
+
+    _close_database(database)
+    monkeypatch.setattr(database, "DB_FILE", str(db_file))
+    database.db_init()
+    row = database.db_execute("SELECT * FROM opportunity_rules WHERE id = 1", fetchone=True)
+    assert (row["last_score"], row["last_level"]) == (65, "MODERATE")
+    assert (row["last_monitor_score"], row["last_monitor_level"]) == (65, "MODERATE")
+    assert row["last_observed_at"] is None
+
+    database.db_execute("UPDATE opportunity_rules SET last_score = 75, last_level = 'STRONG' WHERE id = 1")
+    database.db_init()
+    row = database.db_execute("SELECT * FROM opportunity_rules WHERE id = 1", fetchone=True)
+    assert (row["last_monitor_score"], row["last_monitor_level"]) == (65, "MODERATE")
+    assert (row["last_score"], row["last_level"]) == (75, "STRONG")
+    _close_database(database)
+
+
 def test_db_preflight_creates_missing_parent(monkeypatch, tmp_path):
     from src import database
 

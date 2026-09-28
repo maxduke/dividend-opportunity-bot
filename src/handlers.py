@@ -47,7 +47,6 @@ from .database import (
 )
 from .opportunity import (
     evaluate_opportunity,
-    record_rule_evaluation,
     save_opportunity_snapshot,
 )
 from .proxy_health import (
@@ -324,8 +323,9 @@ async def _add_opportunity_rule(update, context, args, work=None):
                 """
                 INSERT INTO opportunity_rules (
                     user_id, asset_code, asset_name, benchmark_code, benchmark_name,
-                    min_score, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    min_score, last_score, last_level, last_observed_at,
+                    last_monitor_score, last_monitor_level, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     update.effective_user.id,
@@ -334,6 +334,11 @@ async def _add_opportunity_rule(update, context, args, work=None):
                     benchmark_code,
                     benchmark_name,
                     min_score,
+                    snapshot.total_score,
+                    snapshot.level,
+                    snapshot.snapshot_at,
+                    snapshot.total_score,
+                    snapshot.level,
                     now,
                     now,
                 ),
@@ -346,7 +351,6 @@ async def _add_opportunity_rule(update, context, args, work=None):
 
         snapshot.rule_id = created_rule_id
         save_opportunity_snapshot(snapshot, critical=True)
-        record_rule_evaluation(created_rule_id, snapshot)
         creation_complete = True
         guidance, markup = _delivery_guidance(update.effective_user.id)
         await report(
@@ -491,11 +495,15 @@ async def set_rule_active(rule, user_id, context, active, work=None):
             """
             UPDATE opportunity_rules
             SET is_active = 1, revision = revision + 1, last_score = ?, last_level = ?,
+                last_observed_at = ?, last_monitor_score = ?, last_monitor_level = ?,
                 last_alert_score = NULL, last_alert_level = NULL, last_alert_at = NULL,
                 updated_at = ?
             WHERE id = ? AND user_id = ?
             """,
             (
+                snapshot.total_score,
+                snapshot.level,
+                snapshot.snapshot_at,
                 snapshot.total_score,
                 snapshot.level,
                 datetime.now(SHANGHAI_TZ).isoformat(),

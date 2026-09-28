@@ -1,13 +1,14 @@
 import asyncio
 import sqlite3
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from src import database, handlers, rule_ui
+from src import database, handlers, jobs, rule_ui
 from src.user_tasks import task_manager
-from src.opportunity import OpportunitySnapshot, save_opportunity_snapshot
+from src.opportunity import OpportunitySnapshot, record_rule_evaluation, save_opportunity_snapshot
 
 
 @pytest.fixture
@@ -186,7 +187,90 @@ def test_on_off_buttons_share_baseline_and_are_idempotent(rules_db, monkeypatch)
     asyncio.run(resume())
     rule = rule_ui.owned_rule(9, 1)
     assert rule['is_active'] == 1 and rule['last_score'] == 72
+    assert rule['last_monitor_score'] == 72 and rule['last_monitor_level'] == 'MODERATE'
     evaluate.assert_awaited_once()
+
+
+def test_manual_query_and_briefing_do_not_consume_intraday_crossing(rules_db, monkeypatch):
+    rules_db.execute("""UPDATE opportunity_rules SET min_score=70, last_score=65,
+        last_level='MODERATE', last_monitor_score=65, last_monitor_level='MODERATE',
+        last_observed_at='2026-08-24T09:00:00+08:00' WHERE id=1""")
+    rules_db.execute("UPDATE opportunity_rules SET is_active=0 WHERE id=2")
+    rules_db.execute("UPDATE whitelist SET daily_briefing_enabled=1 WHERE user_id=9")
+    rules_db.commit()
+
+    manual = snapshot(score=75)
+    manual.level = 'STRONG'
+    manual.snapshot_at = '2026-08-24T10:00:00+08:00'
+    monkeypatch.setattr(rule_ui, 'evaluate_opportunity', AsyncMock(return_value=manual))
+    async def query():
+        context = SimpleNamespace(bot_data={})
+        await rule_ui.run_query(message(), context, 9, [rule_ui.owned_rule(9, 1)])
+        await (task_manager(context).active.get(9) or task_manager(context).recent[9]).task
+    asyncio.run(query())
+    row = rule_ui.owned_rule(9, 1)
+    assert (row['last_score'], row['last_monitor_score']) == (75, 65)
+
+    briefing = snapshot(score=75)
+    briefing.level = 'STRONG'
+    briefing.snapshot_at = '2026-08-24T10:30:00+08:00'
+    monkeypatch.setattr(jobs, 'is_trading_day', lambda now: True)
+    monkeypatch.setattr(jobs, '_fetch_all_realtime_quotes', AsyncMock(
+        return_value=({'510301': object()}, True)))
+    monkeypatch.setattr(jobs, '_load_opportunity_history', AsyncMock(return_value={}))
+    monkeypatch.setattr(jobs, 'evaluate_opportunity', AsyncMock(return_value=briefing))
+    context = SimpleNamespace(bot_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
+    asyncio.run(jobs.daily_briefing_job(context))
+    row = rule_ui.owned_rule(9, 1)
+    assert (row['last_score'], row['last_monitor_score']) == (75, 65)
+
+    intraday = snapshot(score=75)
+    intraday.level = 'STRONG'
+    intraday.snapshot_at = '2026-08-24T11:00:00+08:00'
+    monkeypatch.setattr(jobs, 'evaluate_opportunity', AsyncMock(return_value=intraday))
+    send = AsyncMock(return_value=True)
+    monkeypatch.setattr(jobs, '_send_opportunity_alert', send)
+    now = datetime.fromisoformat(intraday.snapshot_at)
+    asyncio.run(jobs._evaluate_opportunity_rules(context, [row], {'510301': object()}, {}, now))
+    send.assert_awaited_once()
+    row = rule_ui.owned_rule(9, 1)
+    assert (row['last_monitor_score'], row['last_monitor_level']) == (75, 'STRONG')
+    assert row['last_alert_score'] == 75
+
+
+def test_failed_intraday_alert_preserves_baseline_for_retry(rules_db, monkeypatch):
+    rules_db.execute("""UPDATE opportunity_rules SET min_score=70, last_score=75,
+        last_level='STRONG', last_monitor_score=65, last_monitor_level='MODERATE'
+        WHERE id=1""")
+    rules_db.commit()
+    intraday = snapshot(score=75)
+    intraday.level = 'STRONG'
+    intraday.snapshot_at = '2026-08-24T11:00:00+08:00'
+    monkeypatch.setattr(jobs, 'evaluate_opportunity', AsyncMock(return_value=intraday))
+    send = AsyncMock(side_effect=[False, True])
+    monkeypatch.setattr(jobs, '_send_opportunity_alert', send)
+    context = SimpleNamespace(bot_data={})
+    now = datetime.fromisoformat(intraday.snapshot_at)
+    for _ in range(2):
+        row = rule_ui.owned_rule(9, 1)
+        asyncio.run(jobs._evaluate_opportunity_rules(context, [row], {'510301': object()}, {}, now))
+        if send.await_count == 1:
+            assert rule_ui.owned_rule(9, 1)['last_monitor_score'] == 65
+    assert send.await_count == 2
+    assert rule_ui.owned_rule(9, 1)['last_monitor_score'] == 75
+
+
+def test_older_evaluation_cannot_replace_newer_display(rules_db):
+    newer = snapshot(score=75)
+    newer.level = 'STRONG'
+    newer.snapshot_at = '2026-08-24T11:00:00+08:00'
+    older = snapshot(score=65)
+    older.snapshot_at = '2026-08-24T10:00:00+08:00'
+    record_rule_evaluation(1, newer)
+    record_rule_evaluation(1, older)
+    row = rule_ui.owned_rule(9, 1)
+    assert (row['last_score'], row['last_level'], row['last_observed_at']) == (
+        75, 'STRONG', newer.snapshot_at)
 
 
 def test_threshold_command_and_button_preserve_history(rules_db):

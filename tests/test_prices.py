@@ -234,3 +234,56 @@ def test_quote_freshness_respects_sessions(monkeypatch, quote_time, now_time, ac
     if not accepted:
         assert result.degraded
         assert quote_time in result.note
+
+
+def test_fresh_fetch_with_month_old_bars_cannot_score_or_append_quote(monkeypatch):
+    now = datetime(2026, 8, 24, 10, tzinfo=TZ)
+    frame = _history(pd.bdate_range(end='2026-07-24', periods=300), [100.] * 300)
+    frame.attrs['technical_history_days'] = 550
+    monkeypatch.setattr(data_fetcher, 'is_trading_day', lambda _: True)
+    monkeypatch.setattr(data_fetcher, 'trading_sessions_elapsed', lambda *args: 20)
+    assert not data_fetcher.runtime_history_is_usable(frame, 550, now)
+    result = data_fetcher.build_indicator_close_series(frame, data_fetcher.RealtimeQuote(90, now), now)
+    assert result.closes.empty and result.degraded and not result.spot_used
+    assert '历史行情日期' in result.note
+
+
+def test_holiday_gap_keeps_last_confirmed_history_usable():
+    now = datetime(2024, 10, 8, 10, tzinfo=TZ)
+    frame = _history(['2024-09-30'], [100], asof='2024-10-08')
+    assert data_fetcher.history_dates_are_current(frame, now)
+    result = data_fetcher.build_indicator_close_series(frame, data_fetcher.RealtimeQuote(90, now), now)
+    assert result.spot_used
+
+
+@pytest.mark.parametrize('dates', [['2026-08-25'], ['2026-08-21', '2026-08-21']])
+def test_invalid_history_dates_disable_technical_scoring(dates):
+    now = datetime(2026, 8, 24, 10, tzinfo=TZ)
+    frame = _history(dates, [100] * len(dates))
+    assert not data_fetcher.history_dates_are_current(frame, now)
+    assert data_fetcher.build_indicator_close_series(frame, None, now).closes.empty
+
+
+def test_unavailable_calendar_disables_stale_history(monkeypatch):
+    now = datetime(2026, 8, 24, 10, tzinfo=TZ)
+    monkeypatch.setattr(data_fetcher, 'trading_sessions_elapsed', lambda *args: None)
+    frame = _history(['2026-08-20'], [100])
+    assert not data_fetcher.history_dates_are_current(frame, now)
+
+
+def test_supplied_stale_history_cannot_bypass_evaluation_gate(monkeypatch):
+    from src import opportunity
+    now = datetime(2026, 8, 24, 10, tzinfo=TZ)
+    frame = _history(pd.bdate_range(end='2026-07-24', periods=300), [100.] * 300)
+    frame.attrs['technical_history_days'] = 550
+    monkeypatch.setattr(opportunity, '_now', lambda: now)
+    monkeypatch.setattr(opportunity, 'get_cached_valuation', AsyncMock(return_value=None))
+    monkeypatch.setattr(data_fetcher, 'trading_sessions_elapsed', lambda *args: 20)
+    rule = dict(id=1, asset_code='515180', asset_name='ETF', benchmark_code='000922', benchmark_name='index')
+    result = asyncio.run(opportunity.evaluate_opportunity(
+        rule, SimpleNamespace(bot_data={}), hist_df=frame,
+        quote=data_fetcher.RealtimeQuote(90, now),
+    ))
+    assert result.technical_price_basis == 'unavailable'
+    assert result.ma200 is None and result.high_52w is None and result.rsi6 is None
+    assert result.long_term_score == result.tactical_score == 0

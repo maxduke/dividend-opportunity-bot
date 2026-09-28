@@ -34,9 +34,15 @@ def _rule(**changes):
         "min_score": 60,
         "last_score": None,
         "last_level": None,
+        "last_monitor_score": None,
+        "last_monitor_level": None,
         "last_alert_at": None,
     }
     values.update(changes)
+    if "last_monitor_score" not in changes:
+        values["last_monitor_score"] = values["last_score"]
+    if "last_monitor_level" not in changes:
+        values["last_monitor_level"] = values["last_level"]
     return values
 
 
@@ -60,6 +66,12 @@ def test_alert_threshold_and_level_upgrade_logic():
     assert should_send_opportunity_alert(_rule(last_score=65, last_level="MODERATE"), _snapshot(77, "STRONG"))[0]
     assert not should_send_opportunity_alert(_rule(last_score=77, last_level="STRONG"), _snapshot(79, "STRONG"))[0]
     assert should_send_opportunity_alert(_rule(last_score=77, last_level="STRONG"), _snapshot(86, "RARE"))[0]
+
+
+def test_alert_uses_monitor_baseline_even_when_display_is_newer():
+    rule = _rule(min_score=70, last_score=75, last_level="STRONG",
+                 last_monitor_score=65, last_monitor_level="MODERATE")
+    assert should_send_opportunity_alert(rule, _snapshot(75, "STRONG")) == (True, "level-upgrade")
 
 
 def test_cooldown_blocks_normal_crossing_but_upgrade_overrides():
@@ -200,9 +212,10 @@ def test_implicit_quote_fetch_uses_shared_failure_tracking(monkeypatch):
 
 
 def test_unadjusted_etf_fallback_disables_long_term_metrics(monkeypatch):
+    monkeypatch.setattr("src.opportunity._now", lambda: datetime(2026, 8, 24, 10, tzinfo=ZoneInfo("Asia/Shanghai")))
     history = pd.DataFrame(
         {"收盘": [100.0] * 300},
-        index=pd.date_range("2025-01-01", periods=300),
+        index=pd.date_range(end="2026-08-21", periods=300),
     )
     history.attrs["price_basis"] = "unadjusted_fallback"
     context = SimpleNamespace(bot_data={})
@@ -254,9 +267,10 @@ def test_alert_gate_suppresses_only_missing_runtime_technical_basis():
 
 
 def test_recovered_qfq_history_restores_all_technical_factors(monkeypatch):
+    monkeypatch.setattr("src.opportunity._now", lambda: datetime(2026, 8, 24, 10, tzinfo=ZoneInfo("Asia/Shanghai")))
     history = pd.DataFrame(
         {"收盘": [100.0 + i * 0.01 for i in range(550)]},
-        index=pd.date_range("2025-01-01", periods=550),
+        index=pd.date_range(end="2026-08-21", periods=550),
     )
     history.attrs.update(
         technical_history_days=550,
@@ -378,9 +392,10 @@ def test_unavailable_calendar_uses_valuation_safety_gate(monkeypatch):
 
 
 def test_unconfirmed_qfq_basis_marks_qfq_fallback_degraded(monkeypatch):
+    monkeypatch.setattr("src.opportunity._now", lambda: datetime(2026, 8, 24, 10, tzinfo=ZoneInfo("Asia/Shanghai")))
     history = pd.DataFrame(
         {"收盘": [100.0] * 300},
-        index=pd.date_range("2025-01-01", periods=300),
+        index=pd.date_range(end="2026-08-21", periods=300),
     )
     history.attrs.update(price_basis="qfq", price_basis_asof="2026-08-21")
     monkeypatch.setattr(
