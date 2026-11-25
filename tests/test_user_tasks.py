@@ -382,3 +382,34 @@ def test_rule_revision_migrates_without_losing_existing_rule(monkeypatch):
         assert rule_ui.owned_rule(9, 7)['revision'] == 1
     finally:
         conn.close()
+
+
+def test_cancel_during_submit_updates_status_message(monkeypatch):
+    monkeypatch.setattr(user_tasks, 'is_whitelisted', lambda uid: True)
+
+    async def exercise():
+        entered, release = asyncio.Event(), asyncio.Event()
+        status_msg = SimpleNamespace(edit_text=AsyncMock())
+        manager = user_tasks.UserTaskManager()
+        operation = AsyncMock()
+
+        async def slow_reply(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return status_msg
+
+        pending = asyncio.create_task(
+            manager.submit(9, SimpleNamespace(reply_text=slow_reply), '任务', operation)
+        )
+        await entered.wait()
+        assert manager.cancel(9) is True
+        release.set()
+        assert await pending is None
+        assert not manager.active
+        assert manager.recent[9].state == '已取消'
+        status_msg.edit_text.assert_awaited_once()
+        assert '已取消' in status_msg.edit_text.await_args.args[0]
+        assert status_msg.edit_text.await_args.kwargs['reply_markup'] is None
+        operation.assert_not_awaited()
+
+    asyncio.run(exercise())

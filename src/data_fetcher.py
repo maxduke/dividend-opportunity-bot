@@ -48,6 +48,11 @@ from .utils import get_sina_symbol, normalize_hist_df
 logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 MAX_REALTIME_QUOTE_AGE = timedelta(minutes=5)
+_EASTMONEY_PROXY_FUNCTIONS = frozenset({
+    "stock_zh_a_hist",
+    "fund_etf_hist_em",
+    "stock_individual_info_em",
+})
 
 
 @dataclass(frozen=True)
@@ -246,7 +251,12 @@ def build_indicator_close_series(
         if latest_date == today:
             closes.iloc[-1] = quote_obj.price
         else:
-            closes.loc[pd.Timestamp(today)] = quote_obj.price
+            today_ts = (
+                pd.Timestamp(today, tz=closes.index.tz)
+                if getattr(closes.index, "tz", None) is not None
+                else pd.Timestamp(today)
+            )
+            closes.loc[today_ts] = quote_obj.price
             closes = closes.sort_index()
         return IndicatorPriceSeries(closes, quote_obj.price, today, True, False, None)
 
@@ -297,13 +307,18 @@ async def _run_with_retries(operation, description: str, attempts: int = None):
     return None
 
 
-async def _call_akshare(function, *args, timeout_seconds=None, **kwargs):
+async def _call_akshare(function, *args, timeout_seconds=None, use_proxy=None, **kwargs):
     """Terminate and reap isolated provider calls on timeout or cancellation."""
     timeout = AKSHARE_CALL_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    needs_proxy = (
+        bool(use_proxy)
+        if use_proxy is not None
+        else getattr(function, "__name__", None) in _EASTMONEY_PROXY_FUNCTIONS
+    )
     try:
         return await run_provider_call(
             function, *args, timeout=timeout,
-            proxy_active=proxy_patch_active(), **kwargs,
+            proxy_active=needs_proxy and proxy_patch_active(), **kwargs,
         )
     except asyncio.TimeoutError:
         logger.warning(
@@ -568,7 +583,8 @@ async def get_history_data(
 
         df = None
         source = "sina"
-        proxy_can_use_free_history = not asset_code.startswith(ETF_PREFIXES)
+        is_etf = asset_code.startswith(ETF_PREFIXES)
+        proxy_can_use_free_history = not is_etf
         if ENABLE_AKSHARE_PROXY_PATCH and proxy_can_use_free_history:
             # Sina is not in the proxy hook list. Use it first and pay for
             # EastMoney only when Sina is unavailable or too short. Adjusted
@@ -593,15 +609,19 @@ async def get_history_data(
                 attempts=_em_retry_attempts(),
             )
             source = "em"
-        # Bug3: 统一使用 is None or empty 判断
-        if not history_is_sufficient(df, days):
-            logger.info(f"尝试使用新浪接口获取历史数据({asset_code})。")
-            sina_df = await _run_with_retries(fetch_hist_sina, f"获取历史数据-新浪({asset_code})")
-            if sina_df is not None and (
-                df is None or _valid_close_count(sina_df) >= _valid_close_count(df)
-            ):
-                df = sina_df
-                source = "sina"
+            # For ETFs, Sina only supplies unadjusted history, so never replace
+            # non-empty adjusted EastMoney data with an unadjusted fallback.
+            should_try_sina = (
+                _valid_close_count(df) == 0 if is_etf else not history_is_sufficient(df, days)
+            )
+            if should_try_sina:
+                logger.info(f"尝试使用新浪接口获取历史数据({asset_code})。")
+                sina_df = await _run_with_retries(fetch_hist_sina, f"获取历史数据-新浪({asset_code})")
+                if sina_df is not None and (
+                    df is None or _valid_close_count(sina_df) >= _valid_close_count(df)
+                ):
+                    df = sina_df
+                    source = "sina"
         if df is None or df.empty:
             return None
         df = normalize_hist_df(df)
@@ -652,6 +672,9 @@ async def get_history_data_cached(
         bot = getattr(context, "bot", None)
         if bot is not None:
             await notify_proxy_health(bot)
+        # Re-read the active cache dict in case /refresh or midnight rollover
+        # replaced it while the provider call was awaiting.
+        cache = ensure_daily_history_cache(context, current)
         failures = context.bot_data.setdefault(KEY_HIST_FAILURE_CACHE, {})
         if fetched is None or fetched.empty:
             failures[asset_code] = current

@@ -104,3 +104,50 @@ def test_queue_is_bounded_and_cancelling_waiter_does_not_spawn(tmp_path, monkeyp
             assert_reaped(marker)
         assert not markers[4].exists()
     asyncio.run(exercise())
+
+
+def test_worker_env_strips_sensitive_tokens(monkeypatch):
+    from src.provider_calls import _worker_env
+
+    monkeypatch.setenv("TELEGRAM_TOKEN", "bot-secret")
+    monkeypatch.setenv("AKSHARE_PROXY_AUTH_TOKEN", "proxy-secret")
+
+    non_proxy = _worker_env(proxy_active=False)
+    assert "TELEGRAM_TOKEN" not in non_proxy
+    assert "AKSHARE_PROXY_AUTH_TOKEN" not in non_proxy
+
+    with_proxy = _worker_env(proxy_active=True)
+    assert "TELEGRAM_TOKEN" not in with_proxy
+    assert with_proxy["AKSHARE_PROXY_AUTH_TOKEN"] == "proxy-secret"
+
+
+def test_call_akshare_enables_proxy_only_for_eastmoney_functions(monkeypatch):
+    import akshare as ak
+
+    recorded = []
+
+    async def fake_run_provider_call(function, *args, timeout, proxy_active=False, **kwargs):
+        recorded.append((function.__name__, proxy_active))
+        return "ok"
+
+    monkeypatch.setattr(data_fetcher, "proxy_patch_active", lambda: True)
+    monkeypatch.setattr(data_fetcher, "run_provider_call", fake_run_provider_call)
+
+    async def exercise():
+        await data_fetcher._call_akshare(ak.fund_etf_hist_em)
+        await data_fetcher._call_akshare(ak.stock_zh_a_hist)
+        await data_fetcher._call_akshare(ak.stock_individual_info_em)
+        await data_fetcher._call_akshare(ak.stock_zh_a_minute)
+        await data_fetcher._call_akshare(ak.stock_zh_index_value_csindex)
+        await data_fetcher._call_akshare(ak.bond_china_yield)
+
+    asyncio.run(exercise())
+
+    assert recorded == [
+        ("fund_etf_hist_em", True),
+        ("stock_zh_a_hist", True),
+        ("stock_individual_info_em", True),
+        ("stock_zh_a_minute", False),
+        ("stock_zh_index_value_csindex", False),
+        ("bond_china_yield", False),
+    ]

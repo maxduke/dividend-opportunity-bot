@@ -12,12 +12,20 @@ import pytest
 def test_refresh_clears_history_cache_failure_state_and_date():
     from src import handlers
     from src.config import KEY_CACHE_DATE, KEY_HIST_CACHE, KEY_HIST_FAILURE_CACHE
+    from src.valuation_fetcher import (
+        BOND_FAILURE_CACHE_KEY,
+        BOND_LAST_FETCH_KEY,
+        VALUATION_FAILURE_CACHE_KEY,
+    )
 
     context = SimpleNamespace(
         bot_data={
             KEY_HIST_CACHE: {"510300": object()},
             KEY_HIST_FAILURE_CACHE: {"510300": object()},
             KEY_CACHE_DATE: "2026-08-24",
+            VALUATION_FAILURE_CACHE_KEY: {"000922": object()},
+            BOND_FAILURE_CACHE_KEY: object(),
+            BOND_LAST_FETCH_KEY: object(),
         }
     )
     update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
@@ -27,6 +35,9 @@ def test_refresh_clears_history_cache_failure_state_and_date():
     assert context.bot_data[KEY_HIST_CACHE] == {}
     assert context.bot_data[KEY_HIST_FAILURE_CACHE] == {}
     assert context.bot_data[KEY_CACHE_DATE] is None
+    assert VALUATION_FAILURE_CACHE_KEY not in context.bot_data
+    assert BOND_FAILURE_CACHE_KEY not in context.bot_data
+    assert BOND_LAST_FETCH_KEY not in context.bot_data
 
 
 def test_addop_rejects_unsupported_asset_before_network(monkeypatch):
@@ -373,3 +384,59 @@ def test_opthreshold_storage_error_is_not_reported_as_format_error(monkeypatch):
         ))
 
     reply.assert_not_awaited()
+
+
+def test_proxy_status_invalid_args_does_not_submit_background_task(monkeypatch):
+    from src import handlers
+
+    reply = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=12345),
+        message=SimpleNamespace(reply_text=reply),
+    )
+    context = SimpleNamespace(args=["unexpected"], bot_data={})
+    submit = AsyncMock(side_effect=AssertionError("invalid args must not create a task"))
+    monkeypatch.setattr(handlers, "task_manager", lambda ctx: SimpleNamespace(submit=submit))
+
+    asyncio.run(handlers.proxy_status_command.__wrapped__(update, context))
+
+    assert "正确格式" in reply.await_args.args[0]
+    submit.assert_not_awaited()
+
+
+def test_enable_briefing_callback_ignores_message_not_modified(monkeypatch):
+    from telegram.error import BadRequest
+    from src import handlers
+
+    query = SimpleNamespace(
+        data="briefing_on:9",
+        answer=AsyncMock(),
+        edit_message_reply_markup=AsyncMock(side_effect=BadRequest("Message is not modified")),
+        message=SimpleNamespace(reply_text=AsyncMock()),
+    )
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=9), callback_query=query)
+    monkeypatch.setattr(handlers, "is_whitelisted", lambda uid: True)
+    monkeypatch.setattr(handlers, "BRIEFING_TIMES_STR", "14:50")
+    monkeypatch.setattr(handlers, "db_execute", Mock(return_value={"daily_briefing_enabled": 1}))
+
+    asyncio.run(handlers.enable_briefing_callback(update, SimpleNamespace()))
+
+    assert "已开启每日简报" in query.message.reply_text.await_args.args[0]
+
+
+def test_addop_invalid_args_reply_immediately_without_background_task(monkeypatch):
+    from src import handlers
+
+    reply = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=9),
+        message=SimpleNamespace(reply_text=reply),
+    )
+    context = SimpleNamespace(args=["510300"], bot_data={})
+    submit = AsyncMock(side_effect=AssertionError("invalid args must not create a task"))
+    monkeypatch.setattr(handlers, "task_manager", lambda ctx: SimpleNamespace(submit=submit))
+
+    asyncio.run(handlers.add_opportunity_rule_command.__wrapped__(update, context))
+
+    assert "命令格式错误" in reply.await_args.args[0]
+    submit.assert_not_awaited()

@@ -1,6 +1,7 @@
 """Bounded, disposable provider processes; cancellation releases actual capacity."""
 
 import asyncio
+import os
 import pickle
 import sys
 from pathlib import Path
@@ -13,6 +14,15 @@ class ProviderCallError(RuntimeError):
     pass
 
 
+def _worker_env(proxy_active: bool) -> dict[str, str]:
+    """Pass only the environment the worker needs; never expose Telegram token."""
+    env = os.environ.copy()
+    env.pop('TELEGRAM_TOKEN', None)
+    if not proxy_active:
+        env.pop('AKSHARE_PROXY_AUTH_TOKEN', None)
+    return env
+
+
 async def run_provider_call(function, *args, timeout, proxy_active=False, **kwargs):
     loop = asyncio.get_running_loop()
     slots = _slots.setdefault(loop, asyncio.Semaphore(4))
@@ -23,6 +33,7 @@ async def run_provider_call(function, *args, timeout, proxy_active=False, **kwar
             startup = asyncio.create_task(asyncio.create_subprocess_exec(
                 sys.executable, '-m', 'src.provider_worker',
                 cwd=str(Path(__file__).resolve().parent.parent),
+                env=_worker_env(proxy_active),
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             ))
@@ -44,7 +55,10 @@ async def run_provider_call(function, *args, timeout, proxy_active=False, **kwar
                 stdout, _ = await asyncio.shield(communication)
                 if process.returncode != 0:
                     raise ProviderCallError('数据源工作进程异常退出')
-                success, value = pickle.loads(stdout)
+                try:
+                    success, value = pickle.loads(stdout)
+                except (EOFError, pickle.UnpicklingError, ValueError, TypeError) as exc:
+                    raise ProviderCallError('数据源工作进程返回异常') from exc
                 if not success:
                     raise ProviderCallError(f'数据源调用失败: {value}')
                 return value

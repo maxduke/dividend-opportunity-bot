@@ -21,7 +21,7 @@ from .config import (
     log_config,
     validate_config,
 )
-from .database import db_execute, db_init
+from .database import db_close, db_execute, db_init
 from .provider_bootstrap import install_data_provider_patch
 from .proxy_health import notify_proxy_health
 from .user_tasks import cancel_callback, cancel_command, stop_user_tasks, task_command
@@ -71,6 +71,10 @@ async def error_handler(update: object, context) -> None:
     logger.error("未捕获的异常: %s", context.error, exc_info=context.error)
 
 
+async def post_shutdown(application: Application):
+    db_close()
+
+
 def _command(name, callback):
     # Edited messages have no ``update.message``; editing must not re-run a command.
     return CommandHandler(name, callback, filters=filters.UpdateType.MESSAGE)
@@ -113,7 +117,7 @@ def main():
 
     application = (
         Application.builder().token(TELEGRAM_TOKEN)
-        .post_init(post_init).post_stop(stop_user_tasks).build()
+        .post_init(post_init).post_stop(stop_user_tasks).post_shutdown(post_shutdown).build()
     )
     application.add_error_handler(error_handler)
     application.add_handlers(

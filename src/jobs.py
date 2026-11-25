@@ -259,6 +259,17 @@ async def _evaluate_opportunity_rules(context, rules, quotes, history, now):
                 # Preserve the old baseline so a transient Telegram failure can retry.
                 continue
             if not rule_is_current(rule):
+                # If the user edited the rule while Telegram was delivering the alert,
+                # still persist the sent-alert audit (unless the rule was deleted) so
+                # cooldown and daily alert limits remain accurate.
+                if sent and db_execute(
+                    "SELECT 1 FROM opportunity_rules WHERE id = ? AND user_id = ?",
+                    (rule["id"], rule["user_id"]),
+                    fetchone=True,
+                ):
+                    save_opportunity_snapshot(snapshot, alert_sent=True)
+                    record_rule_alert(rule["id"], snapshot, now)
+                    logger.info("[OPPORTUNITY] 已发送告警 rule=%s reason=%s", rule["id"], reason)
                 continue
             if snapshot_should_persist(rule["id"], snapshot, alert_sent=sent):
                 save_opportunity_snapshot(snapshot, alert_sent=sent)
@@ -271,6 +282,16 @@ async def _evaluate_opportunity_rules(context, rules, quotes, history, now):
 
 
 async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
+    """Run at most one daily briefing job at a time."""
+    lock = context.bot_data.setdefault("daily_briefing_job_lock", asyncio.Lock())
+    if lock.locked():
+        logger.warning("上一次每日简报任务仍在运行，本次跳过以避免重复推送。")
+        return
+    async with lock:
+        await _daily_briefing_job(context)
+
+
+async def _daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(SHANGHAI_TZ)
     await ensure_trade_days_loaded(now)
     await _warn_if_calendar_unavailable(context, now)
@@ -347,7 +368,8 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
         for rule in user_rules:
             snapshot = snapshots.get(rule["id"])
             if snapshot is None:
-                message += f"❓ {html.escape(str(rule['asset_name']))} ({rule['asset_code']}) 查询失败，请稍后使用 /opcheck {rule['id']} 重试\n\n"
+                asset_label = html.escape(str(rule["asset_name"] or rule["asset_code"]))
+                message += f"❓ {asset_label} ({rule['asset_code']}) 查询失败，请稍后使用 /opcheck {rule['id']} 重试\n\n"
                 continue
             if snapshot.technical_price_basis == "qfq_history_close":
                 message += "⚠️ 实时行情未用于评分，本条使用历史收盘价。\n"
@@ -384,6 +406,10 @@ async def daily_briefing_job(context: ContextTypes.DEFAULT_TYPE):
                         await asyncio.sleep(wait_seconds)
             logger.info("已成功向用户 %s 发送每日 Opportunity 简报。", user_id)
         except Forbidden:
-            logger.warning("无法向用户 %s 发送每日简报，可能已被禁用。", user_id)
+            db_execute(
+                "UPDATE whitelist SET daily_briefing_enabled = 0 WHERE user_id = ?",
+                (user_id,),
+            )
+            logger.warning("无法向用户 %s 发送每日简报，已自动关闭该用户的每日简报。", user_id)
         except Exception as exc:
             logger.error("向用户 %s 发送每日简报时发生未知错误: %s", user_id, exc)

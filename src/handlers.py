@@ -4,6 +4,7 @@
 
 import asyncio
 import logging
+import math
 import re
 import sqlite3
 from datetime import datetime
@@ -11,6 +12,7 @@ from functools import wraps
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from .config import (
@@ -57,7 +59,13 @@ from .proxy_health import (
     proxy_health_category,
     proxy_patch_active,
 )
-from .valuation_fetcher import backfill_cn10y, get_cached_valuation
+from .valuation_fetcher import (
+    BOND_FAILURE_CACHE_KEY,
+    BOND_LAST_FETCH_KEY,
+    VALUATION_FAILURE_CACHE_KEY,
+    backfill_cn10y,
+    get_cached_valuation,
+)
 from .user_tasks import AccessRevoked, task_manager
 
 logger = logging.getLogger(__name__)
@@ -126,7 +134,11 @@ async def enable_briefing_callback(update: Update, context: ContextTypes.DEFAULT
         (user_id,), swallow_errors=False,
     )
     await query.answer("已开启每日简报")
-    await query.edit_message_reply_markup(reply_markup=None)
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except BadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
     guidance, _ = _delivery_guidance(user_id)
     await query.message.reply_text("✅ 已开启每日简报\n\n" + guidance)
 
@@ -134,6 +146,8 @@ async def enable_briefing_callback(update: Update, context: ContextTypes.DEFAULT
 def whitelisted_only(func):
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if update.effective_user is None or update.message is None:
+            return
         if not is_whitelisted(update.effective_user.id):
             await update.message.reply_text("抱歉，您没有权限使用此机器人。")
             return
@@ -145,6 +159,8 @@ def whitelisted_only(func):
 def admin_only(func):
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if update.effective_user is None or update.message is None:
+            return
         if update.effective_user.id != ADMIN_USER_ID:
             await update.message.reply_text("抱歉，此命令仅限管理员使用。")
             return
@@ -204,9 +220,41 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(help_text)
 
 
+def _validate_addop_args(user_id: int, args) -> tuple[str, str, float] | str:
+    """Validate /addop arguments synchronously before allocating a background task."""
+    if len(args) not in (2, 3):
+        return "命令格式错误。\n正确格式：/addop <资产代码> <估值基准代码> [最低评分]"
+    asset_code, benchmark_code = args[:2]
+    benchmark_code = benchmark_code.upper()
+    try:
+        min_score = float(args[2]) if len(args) == 3 else OPPORTUNITY_ALERT_THRESHOLD
+    except ValueError:
+        return "最低评分必须是数字。"
+    if not math.isfinite(min_score) or not 0 <= min_score <= 100:
+        return "最低评分必须在 0 到 100 之间。"
+    if not (_CODE_RE.fullmatch(asset_code) and _CODE_RE.fullmatch(benchmark_code)):
+        return "资产代码和估值基准代码必须是 6 位数字。"
+    if asset_code[0] not in STOCK_PREFIXES + ETF_PREFIXES:
+        return f"❌ 暂不支持资产代码 {asset_code}，仅支持股票和 ETF 历史数据源覆盖的代码。"
+    if db_execute(
+        """
+        SELECT id FROM opportunity_rules
+        WHERE user_id = ? AND asset_code = ? AND benchmark_code = ?
+        """,
+        (user_id, asset_code, benchmark_code),
+        fetchone=True,
+    ):
+        return "❌ 相同的资产—估值基准监控规则已存在。"
+    return asset_code, benchmark_code, min_score
+
+
 @whitelisted_only
 async def add_opportunity_rule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = tuple(context.args)
+    validated = _validate_addop_args(update.effective_user.id, args)
+    if isinstance(validated, str):
+        await update.message.reply_text(validated)
+        return
     await task_manager(context).submit(
         update.effective_user.id, update.message, "添加机会规则",
         lambda work: _add_opportunity_rule(update, context, args, work),
@@ -218,50 +266,25 @@ async def _add_opportunity_rule(update, context, args, work=None):
     created_rule_id = None
     creation_complete = False
 
-    async def report(text, reply_markup=None):
+    async def report(text, reply_markup=None, *, final: bool = True):
         if work:
             work.detail = text
             work.result_markup = reply_markup
-            await work._notify(reply_markup or work.keyboard())
-        elif sent_message is not None:
+            if not final:
+                await work._notify(reply_markup or work.keyboard())
+            return text
+        if sent_message is not None:
             await sent_message.edit_text(text, reply_markup=reply_markup)
         else:
             await update.message.reply_text(text, reply_markup=reply_markup)
+        return None
 
     try:
-        if len(args) not in (2, 3):
-            await report(
-                "命令格式错误。\n正确格式：/addop <资产代码> <估值基准代码> [最低评分]"
-            )
+        validated = _validate_addop_args(update.effective_user.id, args)
+        if isinstance(validated, str):
+            await report(validated)
             return
-        asset_code, benchmark_code = args[:2]
-        benchmark_code = benchmark_code.upper()
-        try:
-            min_score = float(args[2]) if len(args) == 3 else OPPORTUNITY_ALERT_THRESHOLD
-        except ValueError:
-            await report("最低评分必须是数字。")
-            return
-        if not 0 <= min_score <= 100:
-            await report("最低评分必须在 0 到 100 之间。")
-            return
-        if not (_CODE_RE.fullmatch(asset_code) and _CODE_RE.fullmatch(benchmark_code)):
-            await report("资产代码和估值基准代码必须是 6 位数字。")
-            return
-        if asset_code[0] not in STOCK_PREFIXES + ETF_PREFIXES:
-            await report(
-                f"❌ 暂不支持资产代码 {asset_code}，仅支持股票和 ETF 历史数据源覆盖的代码。"
-            )
-            return
-        if db_execute(
-            """
-            SELECT id FROM opportunity_rules
-            WHERE user_id = ? AND asset_code = ? AND benchmark_code = ?
-            """,
-            (update.effective_user.id, asset_code, benchmark_code),
-            fetchone=True,
-        ):
-            await report("❌ 相同的资产—估值基准监控规则已存在。")
-            return
+        asset_code, benchmark_code, min_score = validated
 
         if sent_message is None:
             sent_message = await update.message.reply_text(
@@ -299,9 +322,10 @@ async def _add_opportunity_rule(update, context, args, work=None):
             )
             return
 
-        await report("已验证估值基准，正在同步所需的中国十年期国债历史...")
         if work:
-            await work.progress("正在同步国债历史。")
+            await work.progress("已验证估值基准，正在同步所需的中国十年期国债历史...")
+        else:
+            await report("已验证估值基准，正在同步所需的中国十年期国债历史...", final=False)
         backfill_lock = context.bot_data.setdefault("bond_backfill_lock", asyncio.Lock())
         async with backfill_lock:
             await backfill_cn10y()
@@ -368,12 +392,15 @@ async def _add_opportunity_rule(update, context, args, work=None):
     except Exception as exc:
         logger.exception("添加 Opportunity Rule 失败: %s", exc)
         if created_rule_id is not None and not creation_complete:
-            db_execute("DELETE FROM opportunity_snapshots WHERE rule_id = ?", (created_rule_id,))
-            db_execute(
-                "DELETE FROM opportunity_rules WHERE id = ?",
-                (created_rule_id,),
-                swallow_errors=False,
-            )
+            try:
+                db_execute("DELETE FROM opportunity_snapshots WHERE rule_id = ?", (created_rule_id,))
+                db_execute(
+                    "DELETE FROM opportunity_rules WHERE id = ?",
+                    (created_rule_id,),
+                    swallow_errors=False,
+                )
+            except Exception:
+                logger.exception("清理未完成的 Opportunity Rule 失败 rule_id=%s", created_rule_id)
         await report("添加红利机会监控规则时发生内部错误。")
 
 
@@ -599,6 +626,9 @@ async def list_whitelist_command(update: Update, context: ContextTypes.DEFAULT_T
 @admin_only
 async def proxy_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = tuple(context.args)
+    if args and args != ("refresh",):
+        await update.message.reply_text("正确格式：/proxy_status [refresh]")
+        return
     await task_manager(context).submit(
         update.effective_user.id, update.message, "查询代理状态",
         lambda work: _proxy_status_command(update, context, args, work),
@@ -607,6 +637,8 @@ async def proxy_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def _proxy_status_command(update, context, args, work=None):
     if args and args != ("refresh",):
+        if work:
+            return "正确格式：/proxy_status [refresh]"
         await update.message.reply_text("正确格式：/proxy_status [refresh]")
         return
     status = await check_proxy_balance_async(force=bool(args))
@@ -661,4 +693,7 @@ async def refresh_cache_command(update: Update, context: ContextTypes.DEFAULT_TY
     context.bot_data[KEY_HIST_CACHE] = {}
     context.bot_data[KEY_HIST_FAILURE_CACHE] = {}
     context.bot_data[KEY_CACHE_DATE] = None
-    await update.message.reply_text("✅ 历史数据缓存已清空，下次检查时将重新获取。")
+    context.bot_data.pop(VALUATION_FAILURE_CACHE_KEY, None)
+    context.bot_data.pop(BOND_FAILURE_CACHE_KEY, None)
+    context.bot_data.pop(BOND_LAST_FETCH_KEY, None)
+    await update.message.reply_text("✅ 历史数据及失败冷却缓存已清空，下次检查时将重新获取。")
