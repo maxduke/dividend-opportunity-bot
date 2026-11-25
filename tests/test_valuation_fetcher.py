@@ -243,3 +243,11 @@ def test_latest_bond_query_is_bounded_to_gap_window(monkeypatch):
     assert valuation_fetcher.latest_bond_on_or_before(date(2026, 8, 13))["cn10y"] == 1.8
     assert calls == [{"start_date": date(2026, 8, 6), "end_date": date(2026, 8, 13)}]
     assert valuation_fetcher.latest_bond_on_or_before(date(2026, 8, 18)) is None
+
+
+def test_as_number_rejects_non_finite_values():
+    from src.valuation_fetcher import _as_number
+
+    for value in ("inf", "-inf", "+inf", "NaN", "nan", float("inf"), float("-inf"), float("nan"), True, False):
+        assert _as_number(value) is None
+    assert _as_number("5.25%") == 5.25

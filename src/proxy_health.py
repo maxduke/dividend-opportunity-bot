@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from numbers import Real
 from urllib.parse import quote
+from weakref import WeakKeyDictionary
 from zoneinfo import ZoneInfo
 
 import requests
@@ -47,10 +48,20 @@ class ProxyBalanceStatus:
 
 
 _lock = threading.RLock()
+_fetch_lock = threading.Lock()
 _cached_status: ProxyBalanceStatus | None = None
 _cache_identity: tuple[bool, str, str, float] | None = None
 _patch_active = False
-_notification_lock = asyncio.Lock()
+_notification_locks: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+
+
+def _get_notification_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _notification_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _notification_locks[loop] = lock
+    return lock
 
 # Public so tests and the command layer can inspect/reset the dedupe baseline.
 last_notified_proxy_health_state: str | None = None
@@ -154,12 +165,22 @@ def _check_proxy_balance(
             if age < cache_minutes * 60:
                 return _cached_status
 
+    # Serialize network balance queries without holding _lock, so event-loop
+    # callers reading proxy_patch_active() or cached status never stall on HTTP.
+    with _fetch_lock:
+        with _lock:
+            if not force and _cached_status and _cache_identity == identity:
+                age = (checked_at - _cached_status.checked_at).total_seconds()
+                if age < cache_minutes * 60:
+                    return _cached_status
+
         if not str(auth_ip or "").strip() or not str(auth_token or "").strip():
             status = _status(UNVERIFIED, checked_at, reason="missing_config")
         else:
             status = _fetch_balance(str(auth_ip).strip(), str(auth_token), checked_at)
-        _cached_status = status
-        _cache_identity = identity
+        with _lock:
+            _cached_status = status
+            _cache_identity = identity
         return status
 
 
@@ -268,7 +289,7 @@ def _low_balance_message(status: ProxyBalanceStatus) -> str:
 async def notify_proxy_health(bot, startup: bool = False) -> bool:
     """Notify the administrator once per meaningful health transition."""
 
-    async with _notification_lock:
+    async with _get_notification_lock():
         status = get_cached_proxy_balance_status()
         if status is None:
             status = await check_proxy_balance_async()

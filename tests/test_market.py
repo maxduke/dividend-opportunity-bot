@@ -230,3 +230,45 @@ def test_successful_load_that_misses_today_retries_the_same_day(monkeypatch):
     market._record_calendar_load({date(2026, 12, 31), date(2027, 1, 4)}, now, now.date())
     assert cache["failed_at"] is None
     assert not market._calendar_refresh_due(now + market.CALENDAR_UNCOVERED_RETRY)
+
+
+def test_is_trading_day_converts_utc_to_shanghai_date():
+    # 2024-10-07 18:00 UTC is 2024-10-08 02:00 Asia/Shanghai (a trading day after National Day)
+    utc_dt = datetime(2024, 10, 7, 18, 0, tzinfo=ZoneInfo("UTC"))
+    assert market.is_trading_day(utc_dt) is True
+    # 2024-09-30 18:00 UTC is 2024-10-01 02:00 Asia/Shanghai (National Day holiday)
+    utc_holiday = datetime(2024, 9, 30, 18, 0, tzinfo=ZoneInfo("UTC"))
+    assert market.is_trading_day(utc_holiday) is False
+
+
+def test_failed_shielded_calendar_task_is_replaced_on_next_retry(monkeypatch):
+    import asyncio
+
+    check_date = datetime(2026, 8, 24, tzinfo=ZoneInfo("Asia/Shanghai"))
+    attempts = 0
+    release = asyncio.Event()
+
+    async def flaky_call(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            await release.wait()
+            raise RuntimeError("delayed provider failure")
+        return {check_date.date()}
+
+    monkeypatch.setattr(market, "run_provider_call", flaky_call)
+    monkeypatch.setattr(market, "AKSHARE_CALL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(market, "_trade_day_cache", _empty_calendar_cache())
+    monkeypatch.setattr(market, "_trade_day_refresh_task", None)
+    monkeypatch.setattr(market, "LOCAL_CALENDAR_COVERAGE_END", date(2025, 12, 31))
+
+    async def exercise():
+        await market.ensure_trade_days_loaded(check_date)
+        release.set()
+        await asyncio.sleep(0)
+        market._trade_day_cache["failed_at"] -= market.CALENDAR_FAILURE_RETRY
+        await market.ensure_trade_days_loaded(check_date)
+
+    asyncio.run(exercise())
+    assert attempts == 2
+    assert market._trade_day_cache["days"] == {check_date.date()}

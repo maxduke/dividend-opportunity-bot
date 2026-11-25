@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from bisect import bisect_right
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 VALUATION_FAILURE_CACHE_KEY = "valuation_failure_cache"
 BOND_FAILURE_CACHE_KEY = "bond_failure_cache"
+BOND_LAST_FETCH_KEY = "bond_last_fetch_at"
 VALUATION_CACHE_LOCK_KEY = "valuation_cache_lock"
 BOND_CACHE_LOCK_KEY = "bond_cache_lock"
 PROVIDER_FAILURE_COOLDOWN = timedelta(minutes=30)
@@ -35,15 +37,16 @@ def _now() -> datetime:
 
 
 def _as_number(value) -> Optional[float]:
-    if value is None or pd.isna(value):
+    if value is None or isinstance(value, bool) or pd.isna(value):
         return None
     try:
         text = str(value).strip().replace("%", "")
-        if text in {"", "-", "--", "nan", "None"}:
+        if text.lower() in {"", "-", "--", "nan", "none", "inf", "+inf", "-inf"}:
             return None
-        return float(text)
+        number = float(text)
     except (TypeError, ValueError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def normalize_csi_valuation(frame: pd.DataFrame, benchmark_code: str) -> Optional[pd.DataFrame]:
@@ -351,12 +354,17 @@ async def get_cached_cn10y(bot_data: dict):
         if _cache_is_fresh(latest_recent, BOND_CACHE_HOURS):
             logger.debug("[BOND] 命中持久化缓存，跳过网络请求")
             return latest_recent
+        last_fetch_at = bot_data.get(BOND_LAST_FETCH_KEY)
+        if last_fetch_at is not None and _cache_is_fresh({"fetched_at": last_fetch_at}, BOND_CACHE_HOURS):
+            logger.debug("[BOND] 命中近期刷新缓存（长假窗口），跳过网络请求")
+            return latest_bond_on_or_before(_now().date(), max_gap_days=36500)
         if _failure_is_fresh(bot_data.get(BOND_FAILURE_CACHE_KEY)):
             return latest_bond_on_or_before(_now().date(), max_gap_days=36500)
 
         frame, source = await fetch_cn10y()
         if frame is not None:
             bot_data.pop(BOND_FAILURE_CACHE_KEY, None)
+            bot_data[BOND_LAST_FETCH_KEY] = _now()
             count = persist_bond_rows(frame, source)
             logger.info("[BOND] 保存 %s 条 %s 收益率记录", count, source)
         else:

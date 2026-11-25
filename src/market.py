@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from datetime import date, datetime, time, timedelta
+from weakref import WeakKeyDictionary
 from zoneinfo import ZoneInfo
 
 import akshare as ak
@@ -26,8 +27,23 @@ _trade_day_cache = {
     "days": None, "first": None, "last": None,
     "loaded_on": None, "failed_at": None, "retry_after": CALENDAR_FAILURE_RETRY,
 }
-_trade_day_refresh_lock = asyncio.Lock()
+_trade_day_refresh_locks: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
 _trade_day_refresh_task = None
+
+
+def _get_refresh_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _trade_day_refresh_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _trade_day_refresh_locks[loop] = lock
+    return lock
+
+
+def _consume_task_exception(task: asyncio.Task) -> None:
+    """Prevent 'Task exception was never retrieved' on timed-out shielded refreshes."""
+    if not task.cancelled():
+        task.exception()
 
 
 def _load_trade_days_from_ak() -> set | None:
@@ -38,7 +54,10 @@ def _load_trade_days_from_ak() -> set | None:
         date_col = "trade_date" if "trade_date" in df.columns else "日期"
         if date_col not in df.columns:
             return None
-        return set(pd.to_datetime(df[date_col]).dt.date)
+        parsed = pd.to_datetime(df[date_col], errors="coerce").dropna()
+        if parsed.empty:
+            return None
+        return set(parsed.dt.date)
     except Exception as exc:
         logger.warning("从 AKShare 获取交易日历失败: %s", exc)
         return None
@@ -77,14 +96,20 @@ async def ensure_trade_days_loaded(check_date: datetime | None = None) -> None:
     now = datetime.now(SHANGHAI_TZ)
     if not _calendar_refresh_due(now):
         return
-    async with _trade_day_refresh_lock:
+    async with _get_refresh_lock():
         now = datetime.now(SHANGHAI_TZ)
         if not _calendar_refresh_due(now):
             return
+        if _trade_day_refresh_task is not None and _trade_day_refresh_task.done():
+            # Reuse a completed successful refresh, but discard a prior failed/cancelled task
+            # so this retry actually calls the provider again.
+            if _trade_day_refresh_task.cancelled() or _trade_day_refresh_task.exception() is not None:
+                _trade_day_refresh_task = None
         if _trade_day_refresh_task is None:
             _trade_day_refresh_task = asyncio.create_task(
                 run_provider_call(_load_trade_days_from_ak, timeout=AKSHARE_CALL_TIMEOUT_SECONDS)
             )
+            _trade_day_refresh_task.add_done_callback(_consume_task_exception)
         try:
             trade_days = await asyncio.wait_for(
                 asyncio.shield(_trade_day_refresh_task),
@@ -96,13 +121,13 @@ async def ensure_trade_days_loaded(check_date: datetime | None = None) -> None:
         except Exception as exc:
             logger.warning("异步加载交易日历失败: %s", exc)
             trade_days = None
-        if _trade_day_refresh_task.done():
+        if _trade_day_refresh_task is not None and _trade_day_refresh_task.done():
             _trade_day_refresh_task = None
         _record_calendar_load(trade_days, now, cn_date)
 
 
 def is_trading_day(check_date: datetime) -> bool:
-    cn_date = check_date.date()
+    cn_date = check_date.astimezone(SHANGHAI_TZ).date() if check_date.tzinfo else check_date.date()
     if cn_date.weekday() >= 5:
         return False
     if LOCAL_CALENDAR_COVERAGE_START <= cn_date <= LOCAL_CALENDAR_COVERAGE_END:
@@ -134,23 +159,10 @@ def calendar_covers(cn_date: date) -> bool:
     return first is not None and first <= cn_date <= last
 
 
-def trading_sessions_elapsed(start_date: date, end_date: date) -> int | None:
-    """Count XSHG sessions after ``start_date`` through ``end_date``.
-
-    ``None`` means that the calendar could not be established for the whole
-    interval.  The existing local XSHG calendar and trade-day provider cache
-    are deliberately reused; no additional provider/retry loop is introduced.
-    """
-    if isinstance(start_date, datetime):
-        start_date = start_date.date()
-    if isinstance(end_date, datetime):
-        end_date = end_date.date()
-    if start_date > end_date:
-        return None
-
+def _count_uncovered_range(range_start: date, range_end: date) -> int | None:
     sessions = 0
-    cursor = start_date + timedelta(days=1)
-    while cursor <= end_date:
+    cursor = range_start
+    while cursor <= range_end:
         # Weekends are known non-sessions without consulting a provider.
         if cursor.weekday() < 5:
             is_session = is_trading_day(
@@ -161,6 +173,47 @@ def trading_sessions_elapsed(start_date: date, end_date: date) -> int | None:
             if is_session:
                 sessions += 1
         cursor += timedelta(days=1)
+    return sessions
+
+
+def trading_sessions_elapsed(start_date: date, end_date: date) -> int | None:
+    """Count XSHG sessions after ``start_date`` through ``end_date``.
+
+    ``None`` means that the calendar could not be established for the whole
+    interval.  The existing local XSHG calendar and trade-day provider cache
+    are deliberately reused; no additional provider/retry loop is introduced.
+    """
+    if isinstance(start_date, datetime):
+        start_date = start_date.astimezone(SHANGHAI_TZ).date() if start_date.tzinfo else start_date.date()
+    if isinstance(end_date, datetime):
+        end_date = end_date.astimezone(SHANGHAI_TZ).date() if end_date.tzinfo else end_date.date()
+    if start_date > end_date:
+        return None
+    if start_date == end_date:
+        return 0
+
+    interval_start = start_date + timedelta(days=1)
+    sessions = 0
+
+    if interval_start < LOCAL_CALENDAR_COVERAGE_START:
+        before_end = min(end_date, LOCAL_CALENDAR_COVERAGE_START - timedelta(days=1))
+        before = _count_uncovered_range(interval_start, before_end)
+        if before is None:
+            return None
+        sessions += before
+
+    local_start = max(interval_start, LOCAL_CALENDAR_COVERAGE_START)
+    local_end = min(end_date, LOCAL_CALENDAR_COVERAGE_END)
+    if local_start <= local_end:
+        sessions += len(CHINA_CALENDAR.valid_days(start_date=local_start, end_date=local_end))
+
+    if end_date > LOCAL_CALENDAR_COVERAGE_END:
+        after_start = max(interval_start, LOCAL_CALENDAR_COVERAGE_END + timedelta(days=1))
+        after = _count_uncovered_range(after_start, end_date)
+        if after is None:
+            return None
+        sessions += after
+
     return sessions
 
 

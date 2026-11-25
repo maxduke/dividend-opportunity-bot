@@ -288,6 +288,34 @@ def test_recharge_to_low_positive_balance_still_sends_recovery(monkeypatch):
     assert "已恢复" in bot.send_message.calls[0]["text"]
 
 
+def test_slow_balance_fetch_does_not_block_state_readers(monkeypatch):
+    import threading
+    from src import proxy_health
+
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(proxy_health, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    proxy_health.set_proxy_patch_active(True)
+
+    def slow_fetch(ip, token, checked_at):
+        entered.set()
+        release.wait(timeout=2)
+        return proxy_health.ProxyBalanceStatus(proxy_health.POSITIVE, 10.0, checked_at)
+
+    monkeypatch.setattr(proxy_health, "_fetch_balance", slow_fetch)
+    worker = threading.Thread(target=proxy_health.check_proxy_balance, kwargs={"force": True})
+    worker.start()
+    try:
+        assert entered.wait(timeout=2)
+        # Must return immediately without waiting for slow_fetch to finish.
+        assert proxy_health.proxy_patch_active() is True
+        assert proxy_health.get_cached_proxy_balance_status() is None
+    finally:
+        release.set()
+        worker.join(timeout=2)
+    assert proxy_health.get_cached_proxy_balance_status().state == proxy_health.POSITIVE
+
+
 class _AsyncRecorder:
     def __init__(self):
         self.calls = []

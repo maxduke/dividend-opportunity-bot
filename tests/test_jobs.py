@@ -52,6 +52,7 @@ def test_daily_briefing_stops_before_provider_access_without_subscribers(
     from src import jobs
 
     monkeypatch.setattr(jobs, "is_trading_day", lambda now: True)
+    monkeypatch.setattr(jobs, "calendar_covers", lambda day: True)
     monkeypatch.setattr(jobs, "db_execute", lambda *args, **kwargs: [])
     provider = AsyncMock(side_effect=AssertionError("provider should not run"))
     monkeypatch.setattr(jobs, "_fetch_all_realtime_quotes", provider)
@@ -236,6 +237,7 @@ def test_daily_briefing_keeps_degraded_banner_and_rule_details(monkeypatch):
         bot_data={},
     )
     monkeypatch.setattr(jobs, "is_trading_day", lambda now: True)
+    monkeypatch.setattr(jobs, "calendar_covers", lambda day: True)
     monkeypatch.setattr(
         jobs,
         "db_execute",
@@ -292,6 +294,7 @@ def test_daily_briefing_retries_each_chunk_only_once(monkeypatch):
         bot=SimpleNamespace(send_message=send_message), bot_data={}
     )
     monkeypatch.setattr(jobs, "is_trading_day", lambda now: True)
+    monkeypatch.setattr(jobs, "calendar_covers", lambda day: True)
     monkeypatch.setattr(jobs, "db_execute", Mock(side_effect=[[{"user_id": 9}], [rule]]))
     monkeypatch.setattr(
         jobs,
@@ -360,6 +363,7 @@ def test_briefing_quote_outage_still_delivers_and_isolates_failed_rule(monkeypat
         technical_price_basis='qfq_history_close', technical_price_date='2026-08-21',
         data_notes=['实时行情不可用，使用最近确认的 qfq 收盘价'])
     monkeypatch.setattr(jobs, 'is_trading_day', lambda now: True)
+    monkeypatch.setattr(jobs, 'calendar_covers', lambda day: True)
     monkeypatch.setattr(jobs, 'db_execute', Mock(side_effect=[[{'user_id':9}], rules]))
     quotes = AsyncMock(return_value=({}, False))
     monkeypatch.setattr(jobs, '_fetch_all_realtime_quotes', quotes)
@@ -517,3 +521,88 @@ def test_intraday_job_checks_calendar_only_during_session_time(monkeypatch):
     session.return_value = True
     asyncio.run(jobs._check_opportunity_job(SimpleNamespace(bot_data={})))
     assert warn.await_args.kwargs == {"grace": jobs.CALENDAR_ALERT_GRACE}
+
+
+def test_daily_briefing_skips_overlapping_run(monkeypatch):
+    from src import jobs
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_run(context):
+        entered.set()
+        await release.wait()
+
+    runner = AsyncMock(side_effect=blocking_run)
+    monkeypatch.setattr(jobs, "_daily_briefing_job", runner)
+
+    async def exercise():
+        context = SimpleNamespace(bot_data={})
+        first = asyncio.create_task(jobs.daily_briefing_job(context))
+        await entered.wait()
+        await jobs.daily_briefing_job(context)
+        release.set()
+        await first
+
+    asyncio.run(exercise())
+    runner.assert_awaited_once()
+
+
+def test_daily_briefing_disables_subscription_on_forbidden_and_handles_missing_name(monkeypatch):
+    from src import jobs
+
+    monkeypatch.setattr(jobs, "rule_is_current", lambda rule: True)
+    monkeypatch.setattr(jobs, "is_trading_day", lambda now: True)
+    monkeypatch.setattr(jobs, "calendar_covers", lambda day: True)
+    rule = {"id": 1, "user_id": 9, "asset_code": "510300", "asset_name": None}
+    db_mock = Mock(side_effect=[[{"user_id": 9}], [rule], None])
+    send_message = AsyncMock(side_effect=Forbidden("blocked"))
+    context = SimpleNamespace(bot=SimpleNamespace(send_message=send_message), bot_data={})
+    monkeypatch.setattr(jobs, "db_execute", db_mock)
+    monkeypatch.setattr(jobs, "_fetch_all_realtime_quotes", AsyncMock(return_value=({}, False)))
+    monkeypatch.setattr(jobs, "_load_opportunity_history", AsyncMock(return_value={}))
+    monkeypatch.setattr(jobs, "evaluate_opportunity", AsyncMock(side_effect=RuntimeError("boom")))
+
+    asyncio.run(jobs.daily_briefing_job(context))
+
+    sent_text = send_message.await_args.kwargs["text"]
+    assert "None" not in sent_text
+    assert "510300" in sent_text
+    assert db_mock.call_count == 3
+    assert "daily_briefing_enabled = 0" in db_mock.call_args_list[2].args[0]
+    assert db_mock.call_args_list[2].args[1] == (9,)
+
+
+def test_sent_alert_still_records_audit_when_rule_edited_mid_delivery(monkeypatch):
+    from src import jobs
+    from src.opportunity import OpportunitySnapshot
+
+    now = datetime.fromisoformat("2026-08-24T14:00:00+08:00")
+    snapshot = OpportunitySnapshot(
+        1, "510300", "ETF", "000922", "红利", now.isoformat(),
+        total_score=77, level="STRONG", technical_price_basis="qfq_realtime",
+    )
+    rule = dict(
+        id=1, user_id=9, asset_code="510300", min_score=60,
+        last_score=55, last_level="WATCH", last_monitor_score=55,
+        last_monitor_level="WATCH", last_alert_at=None, last_alert_level=None,
+    )
+    # Current before and after evaluation, then edited during send_message.
+    current_states = iter([True, True, False])
+    monkeypatch.setattr(jobs, "rule_is_current", lambda r: next(current_states))
+    monkeypatch.setattr(jobs, "evaluate_opportunity", AsyncMock(return_value=snapshot))
+    monkeypatch.setattr(jobs, "_opportunity_alerts_today", lambda *args: 0)
+    monkeypatch.setattr(jobs, "_send_opportunity_alert", AsyncMock(return_value=True))
+    monkeypatch.setattr(jobs, "db_execute", Mock(return_value={"1": 1}))
+    save_snap = Mock()
+    rec_eval = Mock()
+    rec_alert = Mock()
+    monkeypatch.setattr(jobs, "save_opportunity_snapshot", save_snap)
+    monkeypatch.setattr(jobs, "record_rule_evaluation", rec_eval)
+    monkeypatch.setattr(jobs, "record_rule_alert", rec_alert)
+
+    asyncio.run(jobs._evaluate_opportunity_rules(SimpleNamespace(bot_data={}), [rule], {"510300": object()}, {}, now))
+
+    save_snap.assert_called_once_with(snapshot, alert_sent=True)
+    rec_alert.assert_called_once_with(1, snapshot, now)
+    rec_eval.assert_not_called()

@@ -16,8 +16,10 @@ _conn: Optional[sqlite3.Connection] = None
 _lock = threading.Lock()
 
 
-def _prepare_db_directory() -> Path:
+def _prepare_db_directory() -> Path | str:
     """Create and validate the directory used by SQLite before opening it."""
+    if str(DB_FILE) == ":memory:":
+        return ":memory:"
     db_path = Path(DB_FILE).expanduser()
     directory = db_path.parent.resolve()
     error = (
@@ -50,107 +52,122 @@ def _get_connection() -> sqlite3.Connection:
     return _conn
 
 
+def db_close() -> None:
+    """Close the shared SQLite connection cleanly during application shutdown."""
+    global _conn
+    with _lock:
+        if _conn is not None:
+            try:
+                _conn.close()
+            finally:
+                _conn = None
+
+
 def db_init():
     with _lock:
         conn = _get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS whitelist (
-            user_id INTEGER PRIMARY KEY,
-            daily_briefing_enabled INTEGER NOT NULL DEFAULT 0
-        )''')
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS opportunity_rules (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            asset_code TEXT NOT NULL,
-            asset_name TEXT,
-            benchmark_code TEXT NOT NULL,
-            benchmark_name TEXT,
-            min_score REAL NOT NULL DEFAULT 60,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            revision INTEGER NOT NULL DEFAULT 0,
-            last_score REAL,
-            last_level TEXT,
-            last_observed_at TEXT,
-            last_monitor_score REAL,
-            last_monitor_level TEXT,
-            last_alert_score REAL,
-            last_alert_level TEXT,
-            last_alert_at TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE(user_id, asset_code, benchmark_code)
-        )''')
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS benchmark_valuation_snapshots (
-            benchmark_code TEXT NOT NULL,
-            valuation_date TEXT NOT NULL,
-            benchmark_name TEXT,
-            pe1 REAL,
-            pe2 REAL,
-            dividend_yield1 REAL,
-            dividend_yield2 REAL,
-            source TEXT NOT NULL DEFAULT 'csindex',
-            fetched_at TEXT NOT NULL,
-            PRIMARY KEY (benchmark_code, valuation_date)
-        )''')
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS macro_yield_snapshots (
-            yield_date TEXT PRIMARY KEY,
-            cn10y REAL NOT NULL,
-            source TEXT NOT NULL,
-            fetched_at TEXT NOT NULL
-        )''')
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS opportunity_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            rule_id INTEGER NOT NULL,
-            snapshot_at TEXT NOT NULL,
-            price REAL,
-            spot_price REAL,
-            rsi6 REAL,
-            ma200 REAL,
-            ma200_deviation REAL,
-            high_52w REAL,
-            drawdown_52w REAL,
-            pe1 REAL,
-            pe2 REAL,
-            dividend_yield1 REAL,
-            dividend_yield2 REAL,
-            dividend_yield_used REAL,
-            dividend_yield_percentile REAL,
-            cn10y REAL,
-            dividend_bond_spread REAL,
-            spread_percentile REAL,
-            dividend_yield_score REAL,
-            spread_score REAL,
-            valuation_score REAL,
-            long_term_score REAL,
-            tactical_score REAL,
-            total_score REAL,
-            level TEXT,
-            scoring_mode TEXT,
-            data_quality TEXT,
-            data_notes TEXT,
-            valuation_date TEXT,
-            cn10y_date TEXT,
-            cn10y_source TEXT,
-            technical_price_date TEXT,
-            technical_price_basis TEXT,
-            alert_sent INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY(rule_id) REFERENCES opportunity_rules(id)
-        )''')
-        cursor.execute('''
-        CREATE INDEX IF NOT EXISTS idx_opportunity_snapshots_rule_time
-        ON opportunity_snapshots(rule_id, snapshot_at)
-        ''')
-        _ensure_opportunity_snapshot_schema(cursor)
-        _ensure_opportunity_rule_schema(cursor)
-        if ADMIN_USER_ID:
-            cursor.execute('INSERT OR IGNORE INTO whitelist (user_id) VALUES (?)', (ADMIN_USER_ID,))
-        conn.commit()
-        logger.info("数据库初始化完成。")
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS whitelist (
+                user_id INTEGER PRIMARY KEY,
+                daily_briefing_enabled INTEGER NOT NULL DEFAULT 0
+            )''')
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS opportunity_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                asset_code TEXT NOT NULL,
+                asset_name TEXT,
+                benchmark_code TEXT NOT NULL,
+                benchmark_name TEXT,
+                min_score REAL NOT NULL DEFAULT 60,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                revision INTEGER NOT NULL DEFAULT 0,
+                last_score REAL,
+                last_level TEXT,
+                last_observed_at TEXT,
+                last_monitor_score REAL,
+                last_monitor_level TEXT,
+                last_alert_score REAL,
+                last_alert_level TEXT,
+                last_alert_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, asset_code, benchmark_code)
+            )''')
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS benchmark_valuation_snapshots (
+                benchmark_code TEXT NOT NULL,
+                valuation_date TEXT NOT NULL,
+                benchmark_name TEXT,
+                pe1 REAL,
+                pe2 REAL,
+                dividend_yield1 REAL,
+                dividend_yield2 REAL,
+                source TEXT NOT NULL DEFAULT 'csindex',
+                fetched_at TEXT NOT NULL,
+                PRIMARY KEY (benchmark_code, valuation_date)
+            )''')
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS macro_yield_snapshots (
+                yield_date TEXT PRIMARY KEY,
+                cn10y REAL NOT NULL,
+                source TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            )''')
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS opportunity_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id INTEGER NOT NULL,
+                snapshot_at TEXT NOT NULL,
+                price REAL,
+                spot_price REAL,
+                rsi6 REAL,
+                ma200 REAL,
+                ma200_deviation REAL,
+                high_52w REAL,
+                drawdown_52w REAL,
+                pe1 REAL,
+                pe2 REAL,
+                dividend_yield1 REAL,
+                dividend_yield2 REAL,
+                dividend_yield_used REAL,
+                dividend_yield_percentile REAL,
+                cn10y REAL,
+                dividend_bond_spread REAL,
+                spread_percentile REAL,
+                dividend_yield_score REAL,
+                spread_score REAL,
+                valuation_score REAL,
+                long_term_score REAL,
+                tactical_score REAL,
+                total_score REAL,
+                level TEXT,
+                scoring_mode TEXT,
+                data_quality TEXT,
+                data_notes TEXT,
+                valuation_date TEXT,
+                cn10y_date TEXT,
+                cn10y_source TEXT,
+                technical_price_date TEXT,
+                technical_price_basis TEXT,
+                alert_sent INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(rule_id) REFERENCES opportunity_rules(id)
+            )''')
+            cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_opportunity_snapshots_rule_time
+            ON opportunity_snapshots(rule_id, snapshot_at)
+            ''')
+            _ensure_opportunity_snapshot_schema(cursor)
+            _ensure_opportunity_rule_schema(cursor)
+            if ADMIN_USER_ID:
+                cursor.execute('INSERT OR IGNORE INTO whitelist (user_id) VALUES (?)', (ADMIN_USER_ID,))
+            conn.commit()
+            logger.info("数据库初始化完成。")
+        except Exception:
+            _rollback(conn)
+            raise
 
 def _ensure_opportunity_snapshot_schema(cursor: sqlite3.Cursor):
     """Keep additive snapshot metadata compatible with an earlier V1 schema."""

@@ -88,6 +88,15 @@ class UserTaskManager:
         try:
             work.message = await message.reply_text(work.text(), reply_markup=work.keyboard())
             if self.closing or work.cancel_requested:
+                if work.cancel_requested and not self.closing:
+                    work.state = '已取消'
+                    work.detail = '已完成的结果会保留，未完成部分不再继续。'
+                    work.result_markup = None
+                    await work._notify(None)
+                    self.recent[user_id] = work
+                    self.recent.move_to_end(user_id)
+                    while len(self.recent) > 100:
+                        self.recent.popitem(last=False)
                 if self.active.get(user_id) is work:
                     self.active.pop(user_id)
                 return None
@@ -168,6 +177,8 @@ def task_manager(context):
 
 
 async def task_command(update, context):
+    if update.effective_user is None or update.message is None:
+        return
     user_id = update.effective_user.id
     if not is_whitelisted(user_id):
         await update.message.reply_text('抱歉，您没有权限使用此机器人。')
@@ -181,6 +192,8 @@ async def task_command(update, context):
 
 
 async def cancel_command(update, context):
+    if update.effective_user is None or update.message is None:
+        return
     user_id = update.effective_user.id
     if not is_whitelisted(user_id):
         await update.message.reply_text('抱歉，您没有权限使用此机器人。')

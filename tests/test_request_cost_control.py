@@ -664,3 +664,77 @@ def test_name_provider_exception_retries_then_uses_code(monkeypatch):
     assert provider.await_count == 2
     assert asyncio.run(data_fetcher.get_asset_name_with_cache('515180', context)) == '资产_515180'
     assert provider.await_count == 2
+
+
+def test_proxy_stock_short_history_does_not_retry_sina_twice(monkeypatch):
+    from src import data_fetcher
+
+    calls = []
+    short_history = pd.DataFrame(
+        {"日期": pd.date_range("2026-01-01", periods=100), "收盘": [10.0] * 100}
+    )
+
+    async def fake_call(function, *args, **kwargs):
+        calls.append(function.__name__)
+        return short_history.copy()
+
+    monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", True)
+    monkeypatch.setattr(data_fetcher, "FETCH_RETRY_DELAY_SECONDS", 0)
+    _enable_paid_proxy(monkeypatch, data_fetcher)
+    monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
+
+    result = asyncio.run(data_fetcher.get_history_data("600000", 550))
+
+    assert result is not None
+    assert calls == ["stock_zh_a_daily", "stock_zh_a_hist"]
+
+
+def test_partial_qfq_etf_history_is_not_overwritten_by_unadjusted_sina(monkeypatch):
+    from src import data_fetcher
+
+    calls = []
+    partial_qfq = pd.DataFrame(
+        {"日期": pd.date_range("2025-10-01", periods=210), "收盘": [1.5] * 210}
+    )
+
+    async def fake_call(function, *args, **kwargs):
+        calls.append(function.__name__)
+        return partial_qfq.copy()
+
+    monkeypatch.setattr(data_fetcher, "ENABLE_AKSHARE_PROXY_PATCH", False)
+    monkeypatch.setattr(data_fetcher, "_call_akshare", fake_call)
+
+    result = asyncio.run(data_fetcher.get_history_data("515180", 550))
+
+    assert result is not None
+    assert calls == ["fund_etf_hist_em"]
+    assert result.attrs["price_basis"] == "qfq"
+
+
+def test_bond_cache_avoids_refetch_during_long_holiday_window(monkeypatch):
+    from src import valuation_fetcher
+
+    now = datetime(2026, 10, 8, 10, 0, tzinfo=valuation_fetcher.SHANGHAI_TZ)
+    old_row = {
+        "yield_date": "2026-09-29",
+        "fetched_at": now.isoformat(),
+        "cn10y": 1.80,
+        "source": "chinabond",
+    }
+    frame = pd.DataFrame({"日期": [pd.Timestamp("2026-09-29").date()], "cn10y": [1.80]})
+    fetch = AsyncMock(return_value=(frame, "chinabond"))
+    monkeypatch.setattr(valuation_fetcher, "_now", lambda: now)
+    monkeypatch.setattr(valuation_fetcher, "fetch_cn10y", fetch)
+    monkeypatch.setattr(valuation_fetcher, "persist_bond_rows", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(
+        valuation_fetcher,
+        "latest_bond_on_or_before",
+        lambda target_date, max_gap_days=7: None if max_gap_days <= 7 else old_row,
+    )
+    bot_data = {}
+
+    first = asyncio.run(valuation_fetcher.get_cached_cn10y(bot_data))
+    second = asyncio.run(valuation_fetcher.get_cached_cn10y(bot_data))
+
+    assert first == old_row and second == old_row
+    fetch.assert_awaited_once()

@@ -215,6 +215,7 @@ def test_manual_query_and_briefing_do_not_consume_intraday_crossing(rules_db, mo
     briefing.level = 'STRONG'
     briefing.snapshot_at = '2026-08-24T10:30:00+08:00'
     monkeypatch.setattr(jobs, 'is_trading_day', lambda now: True)
+    monkeypatch.setattr(jobs, 'calendar_covers', lambda day: True)
     monkeypatch.setattr(jobs, '_fetch_all_realtime_quotes', AsyncMock(
         return_value=({'510301': object()}, True)))
     monkeypatch.setattr(jobs, '_load_opportunity_history', AsyncMock(return_value={}))

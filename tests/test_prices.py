@@ -287,3 +287,22 @@ def test_supplied_stale_history_cannot_bypass_evaluation_gate(monkeypatch):
     assert result.technical_price_basis == 'unavailable'
     assert result.ma200 is None and result.high_52w is None and result.rsi6 is None
     assert result.long_term_score == result.tactical_score == 0
+
+
+def test_tz_aware_history_index_appends_today_quote_without_type_error(monkeypatch):
+    _trading_day(monkeypatch)
+    frame = pd.DataFrame(
+        {"收盘": [100.0]},
+        index=pd.DatetimeIndex(["2026-08-21"], tz="Asia/Shanghai"),
+    )
+    frame.attrs["price_basis"] = "qfq"
+    frame.attrs["price_basis_asof"] = "2026-08-24"
+
+    result = data_fetcher.build_indicator_close_series(
+        frame,
+        data_fetcher.RealtimeQuote(101.0, datetime(2026, 8, 24, 10, tzinfo=TZ)),
+        datetime(2026, 8, 24, 10, 1, tzinfo=TZ),
+    )
+
+    assert result.spot_used
+    assert list(result.closes) == [100.0, 101.0]

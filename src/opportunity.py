@@ -15,6 +15,7 @@ import pandas as pd
 from .config import (
     CSI_DIVIDEND_YIELD_FIELD,
     DATA_QUALITY_LABELS,
+    KEY_HIST_CACHE,
     MIN_VALUATION_SCORE_FOR_OPPORTUNITY,
     OPPORTUNITY_ALERT_COOLDOWN_MINUTES,
     OPPORTUNITY_LEVEL_LABELS,
@@ -229,16 +230,16 @@ async def evaluate_opportunity(
     benchmark_name = str(rule["benchmark_name"] or benchmark_code)
     notes: list[str] = []
 
-    cache = bot_data.setdefault("hist_data_cache", {})
+    cache = bot_data.setdefault(KEY_HIST_CACHE, {})
     supplied_history = hist_df is not None
     if hist_df is None:
         hist_df = cache.get(asset_code)
     if not supplied_history and not runtime_history_is_usable(
         hist_df, TECHNICAL_HISTORY_DAYS, now
     ):
-        fetched = await get_history_data_cached(context, asset_code, TECHNICAL_HISTORY_DAYS)
+        fetched = await get_history_data_cached(context, asset_code, TECHNICAL_HISTORY_DAYS, now)
         if fetched is not None and not fetched.empty:
-            cache[asset_code] = fetched
+            bot_data.setdefault(KEY_HIST_CACHE, {})[asset_code] = fetched
             hist_df = fetched
     if quote is None and isinstance(spot_price, RealtimeQuote):
         quote = spot_price
@@ -700,7 +701,7 @@ def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optio
         )
     )
     return (
-        f"{icon} <b>红利机会 · {_display_label(OPPORTUNITY_LEVEL_LABELS, snapshot.level)}</b>\n"
+        f"{icon} <b>红利机会 · {html.escape(_display_label(OPPORTUNITY_LEVEL_LABELS, snapshot.level))}</b>\n"
         f"评分：<b>{snapshot.total_score:.0f} / 100</b>\n\n"
         f"{partial_warning}"
         f"{trigger_line}"
@@ -714,7 +715,7 @@ def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optio
         f"PE2：{f(snapshot.pe2, 2)}\n\n"
         f"历史分位：{percentile}\n"
         f"利差分位：{spread_percentile}\n"
-        f"评分模式：<code>{_display_label(SCORING_MODE_LABELS, snapshot.scoring_mode)}</code>\n\n"
+        f"评分模式：<code>{html.escape(_display_label(SCORING_MODE_LABELS, snapshot.scoring_mode))}</code>\n\n"
         f"中国十年期国债：{f(snapshot.cn10y, 2, '%')}"
         f"（{html.escape(snapshot.cn10y_source or '暂无')}）\n"
         f"股息率—国债利差：{f(snapshot.dividend_bond_spread, 2, ' 个百分点')}\n\n"
@@ -739,7 +740,7 @@ def format_opportunity_detail(snapshot: OpportunitySnapshot, alert_reason: Optio
         f"中证估值：{html.escape(snapshot.valuation_date or '暂无')}\n"
         f"中国十年期国债：{html.escape(snapshot.cn10y_date or '暂无')}\n"
         f"数据来源：{html.escape(snapshot.cn10y_source or '暂无')}\n\n"
-        f"数据质量：<code>{_display_label(DATA_QUALITY_LABELS, snapshot.data_quality)}</code>\n"
+        f"数据质量：<code>{html.escape(_display_label(DATA_QUALITY_LABELS, snapshot.data_quality))}</code>\n"
         f"备注：\n{notes}"
     )
 

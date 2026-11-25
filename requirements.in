@@ -3,5 +3,7 @@ akshare
 akshare-proxy-patch==0.5.0
 requests
 urllib3>=2.8.0
+certifi>=2026.10.18
+soupsieve>=4.0.0
 pandas
 pandas_market_calendars
